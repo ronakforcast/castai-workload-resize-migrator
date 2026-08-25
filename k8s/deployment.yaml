@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: woop-rebalance
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: woop-rebalance-controller
+  namespace: woop-rebalance
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: woop-rebalance-controller
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+    resourceNames: ["woop-rebalance-controller"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+    resourceNames: ["woop-rebalance-controller"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: woop-rebalance-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: woop-rebalance-controller
+subjects:
+  - kind: ServiceAccount
+    name: woop-rebalance-controller
+    namespace: woop-rebalance
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: castai-credentials
+  namespace: woop-rebalance
+type: Opaque
+stringData:
+  api-key: "REPLACE_ME"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: woop-rebalance-controller
+  namespace: woop-rebalance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: woop-rebalance-controller
+  template:
+    metadata:
+      labels:
+        app: woop-rebalance-controller
+    spec:
+      serviceAccountName: woop-rebalance-controller
+      containers:
+        - name: controller
+          image: ttl.sh/woop-rebalance-controller:latest
+          imagePullPolicy: Always
+          env:
+            - name: DRY_RUN
+              value: "true"
+            - name: CASTAI_CLUSTER_ID
+              value: "d0721ae5-9b97-489e-97a9-0d3a185eba26"
+            - name: CASTAI_API_URL
+              value: "https://api.cast.ai"
+            - name: CASTAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: castai-credentials
+                  key: api-key
+            - name: PENDING_THRESHOLD
+              value: "2m"
+            - name: NODE_DELTA_THRESHOLD
+              value: "0.15"
+            - name: REBALANCE_ALERT_THRESHOLD
+              value: "3"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              memory: "256Mi"

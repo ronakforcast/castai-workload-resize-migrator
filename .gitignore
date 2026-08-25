@@ -1,0 +1,39 @@
+# Binaries
+woop-rebalance-controller
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.out
+
+# Go vendor directory
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets and credentials
+*.key
+*.pem
+*.crt
+.env
+.env.local
+*secret*
+*credential*
+*apikey*
+*api-key*
+*token*
