@@ -35,7 +35,7 @@ func Load() Config {
 		MigrationAlertThreshold: getInt("MIGRATION_ALERT_THRESHOLD", 3),
 		CLMNodeTemplate:         getString("CLM_NODE_TEMPLATE", "clm-live-migration-template"),
 		LeaderElection:          getBool("LEADER_ELECTION_ENABLED", true),
-		LeaseName:               getString("LEADER_ELECTION_LEASE_NAME", "woop-rebalance-controller"),
+		LeaseName:               getString("LEADER_ELECTION_LEASE_NAME", "castai-workload-resize-migrator"),
 		PodNamespace:            getString("POD_NAMESPACE", ""),
 		PodName:                 getString("POD_NAME", ""),
 	}

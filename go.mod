@@ -1,4 +1,4 @@
-module woop-rebalance-controller
+module castai-workload-resize-migrator
 
 go 1.26.2
 

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"woop-rebalance-controller/pkg/config"
-	"woop-rebalance-controller/pkg/detector"
+	"castai-workload-resize-migrator/pkg/config"
+	"castai-workload-resize-migrator/pkg/detector"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"

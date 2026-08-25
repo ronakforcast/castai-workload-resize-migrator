@@ -1,18 +1,18 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: woop-rebalance
+  name: castai-workload-resize-migrator
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: woop-rebalance-controller
-  namespace: woop-rebalance
+  name: castai-workload-resize-migrator
+  namespace: castai-workload-resize-migrator
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: woop-rebalance-controller
+  name: castai-workload-resize-migrator
 rules:
   - apiGroups: [""]
     resources: ["pods", "nodes"]
@@ -26,72 +26,71 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "create", "update"]
-    resourceNames: ["woop-rebalance-controller"]
+    resourceNames: ["castai-workload-resize-migrator"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]
-    resourceNames: ["woop-rebalance-controller"]
+    resourceNames: ["castai-workload-resize-migrator"]
+  - apiGroups: ["live.cast.ai"]
+    resources: ["migrations"]
+    verbs: ["get", "list", "watch", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: woop-rebalance-controller
+  name: castai-workload-resize-migrator
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: woop-rebalance-controller
+  name: castai-workload-resize-migrator
 subjects:
   - kind: ServiceAccount
-    name: woop-rebalance-controller
-    namespace: woop-rebalance
+    name: castai-workload-resize-migrator
+    namespace: castai-workload-resize-migrator
 ---
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
-  name: castai-credentials
-  namespace: woop-rebalance
-type: Opaque
-stringData:
-  api-key: "REPLACE_ME"
+  name: castai-workload-resize-migrator
+  namespace: castai-workload-resize-migrator
+data:
+  placeholder: "leader-election-lock"
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: woop-rebalance-controller
-  namespace: woop-rebalance
+  name: castai-workload-resize-migrator
+  namespace: castai-workload-resize-migrator
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: woop-rebalance-controller
+      app: castai-workload-resize-migrator
   template:
     metadata:
       labels:
-        app: woop-rebalance-controller
+        app: castai-workload-resize-migrator
     spec:
-      serviceAccountName: woop-rebalance-controller
+      serviceAccountName: castai-workload-resize-migrator
       containers:
         - name: controller
-          image: ttl.sh/woop-rebalance-controller:latest
+          image: ttl.sh/castai-workload-resize-migrator:latest
           imagePullPolicy: Always
           env:
             - name: DRY_RUN
               value: "true"
-            - name: CASTAI_CLUSTER_ID
-              value: "d0721ae5-9b97-489e-97a9-0d3a185eba26"
-            - name: CASTAI_API_URL
-              value: "https://api.cast.ai"
-            - name: CASTAI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: castai-credentials
-                  key: api-key
             - name: PENDING_THRESHOLD
               value: "2m"
             - name: NODE_DELTA_THRESHOLD
               value: "0.15"
-            - name: REBALANCE_ALERT_THRESHOLD
+            - name: MIGRATION_TIMEOUT
+              value: "10m"
+            - name: MIGRATION_RETRY_LIMIT
               value: "3"
+            - name: MIGRATION_ALERT_THRESHOLD
+              value: "3"
+            - name: CLM_NODE_TEMPLATE
+              value: "clm-live-migration-template"
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

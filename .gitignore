@@ -1,5 +1,5 @@
 # Binaries
-woop-rebalance-controller
+castai-workload-resize-migrator
 *.exe
 *.dll
 *.so

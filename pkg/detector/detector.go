@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"woop-rebalance-controller/pkg/config"
+	"castai-workload-resize-migrator/pkg/config"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"

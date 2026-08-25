@@ -1,4 +1,4 @@
-# WOO Rebalance Controller
+# castai-workload-resize-migrator
 
 Detects when CAST AI Workload Autoscaler (WOO) cannot apply a CPU upsize recommendation to a pod because the node is full, and triggers CAST AI Container Live Migration (CLM) by creating a `Migration` CRD. CAST AI CLM then provisions a suitable node and live-migrates the pod so the upsize can be applied.
 
@@ -35,7 +35,7 @@ This controller focuses only on **detecting the stuck resize** and **triggering 
 env DRY_RUN=true \
   PENDING_THRESHOLD=5s \
   NODE_DELTA_THRESHOLD=0.10 \
-  go run ./cmd/woop-rebalance-controller -kubeconfig "$HOME/.kube/config"
+  go run ./cmd/castai-workload-resize-migrator -kubeconfig "$HOME/.kube/config"
 ```
 
 ## Testing
@@ -59,13 +59,13 @@ Source pods must be scheduled on nodes created from that template.
 ## Project layout
 
 ```
-woop-rebalance-controller/
-├── cmd/woop-rebalance-controller/   # Main entry point
+castai-workload-resize-migrator/
+├── cmd/castai-workload-resize-migrator/   # Main entry point
 ├── pkg/
-│   ├── config/                      # Environment-based config
-│   ├── detector/                    # Pending resize detection
-│   └── migrator/                    # CAST AI Migration CRD creation
+│   ├── config/                            # Environment-based config
+│   ├── detector/                          # Pending resize detection
+│   └── migrator/                          # CAST AI Migration CRD creation
 ├── k8s/
-│   └── deployment.yaml              # In-cluster deployment manifest
+│   └── deployment.yaml                    # In-cluster deployment manifest
 └── Dockerfile
 ```

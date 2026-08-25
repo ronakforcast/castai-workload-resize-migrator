@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"woop-rebalance-controller/pkg/config"
-	"woop-rebalance-controller/pkg/detector"
+	"castai-workload-resize-migrator/pkg/config"
+	"castai-workload-resize-migrator/pkg/detector"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -76,7 +76,7 @@ func (c *Client) triggerOne(ctx context.Context, p *detector.PodPendingInfo) err
 				"name":      migrationName,
 				"namespace": p.Namespace,
 				"labels": map[string]interface{}{
-					"woop-rebalance-controller/managed": "true",
+					"castai-workload-resize-migrator/managed": "true",
 				},
 			},
 			"spec": map[string]interface{}{
