@@ -32,12 +32,27 @@ This controller focuses only on **detecting the stuck resize** and **triggering 
 flowchart TD
     WOOP[WOOP recommends CPU upsize] --> Pod[Pod patched via /resize]
     Pod --> Kubelet[Kubelet sets PodResizePending=True]
-    Kubelet --> Candidate{Candidate?}
-    Candidate -->|migration-enabled=true<br/>PodResizePending=True<br/>Infeasible or Deferred > threshold| Create[Create Migration CRD immediately]
+    Kubelet --> Candidate{Is this pod a candidate
+for migration?}
+    Candidate -->|Yes — see below| Create[Create Migration CRD immediately]
     Candidate -->|No| Skip[Skip pod]
     Create --> CLM[CLM provisions node & migrates pod]
     CLM --> Done[Pod on new node, resize applied]
 ```
+
+### What makes a pod a candidate?
+
+A pod is a candidate for migration when all of these are true:
+
+1. **CLM can migrate it** — the pod has the `live.cast.ai/migration-enabled=true` label, which CAST AI CLM adds automatically to pods it can live-migrate.
+
+2. **The resize is stuck** — kubelet set `PodResizePending=True` on the pod, meaning the CPU upsize could not be applied because the node doesn't have enough free CPU.
+
+3. **The resize won't resolve on its own** — one of:
+   - `Infeasible` — the requested CPU is bigger than the node's total capacity. The pod can **never** get its resize on this node. Migration is triggered **immediately**.
+   - `Deferred` — the requested CPU fits on the node in theory, but other pods are using the space right now. The controller waits `PENDING_THRESHOLD` (default 2 minutes) to give the node a chance to free up. If it's still stuck after that, migration is triggered.
+
+If any of these conditions is not met, the pod is skipped.
 
 ---
 
