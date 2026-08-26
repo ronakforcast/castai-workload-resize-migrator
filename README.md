@@ -1,6 +1,6 @@
 # castai-workload-resize-migrator
 
-Detects when CAST AI Workload Autoscaler (WOO) cannot apply a CPU upsize recommendation to a pod because the node is full, and triggers CAST AI Container Live Migration (CLM) by creating a `Migration` CRD. CAST AI CLM then provisions a suitable node and live-migrates the pod so the upsize can be applied.
+Detects when CAST AI Workload Autoscaler (WOOP) cannot apply a CPU upsize recommendation to a pod because the node is full, and triggers CAST AI Container Live Migration (CLM) by creating a `Migration` CRD. CAST AI CLM then provisions a suitable node and live-migrates the pod so the upsize can be applied.
 
 ---
 
@@ -20,7 +20,7 @@ Detects when CAST AI Workload Autoscaler (WOO) cannot apply a CPU upsize recomme
 
 ## Why
 
-WOO can recommend larger CPU requests for Coder pods, but if the node is full, Kubernetes defers the in-place resize (`desired > allocated`). The pod stays stuck at the old allocation. CAST AI Container Live Migration can move the pod to a node with enough room, allowing WOO to apply the upsize.
+WOOP can recommend larger CPU requests for Coder pods, but if the node is full, Kubernetes defers the in-place resize (`desired > allocated`). The pod stays stuck at the old allocation. CAST AI Container Live Migration can move the pod to a node with enough room, allowing WOOP to apply the upsize.
 
 This controller focuses only on **detecting the stuck resize** and **triggering the migration**. Node provisioning, capacity pod creation, checkpoint/restore, and live migration are handled by CAST AI CLM.
 
@@ -32,7 +32,7 @@ This controller focuses only on **detecting the stuck resize** and **triggering 
 
 ```mermaid
 flowchart LR
-    WOO[WOO recommends CPU upsize] --> Pod[Pod patched via /resize]
+    WOOP[WOOP recommends CPU upsize] --> Pod[Pod patched via /resize]
     Pod --> Controller{desired > allocated?}
     Controller -->|Yes| SafetyScan[Safety Scan every 1 min]
     SafetyScan --> Migrator[Create Migration CRD]
