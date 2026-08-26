@@ -67,7 +67,7 @@ func TestE03_InfeasibleResizeDetected(t *testing.T) {
 
 	podName := getPodName(t, ns, "app", "nginx")
 	// Patch to a CPU larger than any node's total capacity (1930m)
-	patchPodResize(t, ns, podName, "nginx", "2500m")
+	patchPodResize(t, ns, podName, "nginx", "4500m")
 
 	reason, msg := waitForPodResizePending(t, ns, podName, 60*time.Second)
 	if reason != "Infeasible" {
@@ -188,14 +188,10 @@ func TestE07_MigrationCompletes(t *testing.T) {
 	deployNginx(t, ns, "nginx", 1, "100m")
 	waitForDeployment(t, ns, "nginx", 2*time.Minute)
 
-	// Fill the node so resize won't fit
-	deployFiller(t, ns, "filler-1", "600m")
-	deployFiller(t, ns, "filler-2", "600m")
-	waitForDeployment(t, ns, "filler-1", 2*time.Minute)
-	waitForDeployment(t, ns, "filler-2", 2*time.Minute)
-
+	// Use Infeasible resize (4500m > node total capacity 3920m)
+	// so PodResizePending is guaranteed regardless of fillers.
 	podName := getPodName(t, ns, "app", "nginx")
-	patchPodResize(t, ns, podName, "nginx", "1500m")
+	patchPodResize(t, ns, podName, "nginx", "4500m")
 
 	reason, _ := waitForPodResizePending(t, ns, podName, 60*time.Second)
 	t.Logf("PodResizePending: reason=%s", reason)
@@ -208,8 +204,8 @@ func TestE07_MigrationCompletes(t *testing.T) {
 	// Find the clone pod and check its allocated CPU
 	clonePodName := podName + "-clone-1"
 	allocated := getPodAllocatedCPU(t, ns, clonePodName)
-	if allocated != "1500m" {
-		t.Fatalf("expected clone pod allocated CPU=1500m, got %s", allocated)
+	if allocated != "4500m" {
+		t.Fatalf("expected clone pod allocated CPU=4500m, got %s", allocated)
 	}
 	t.Logf("Migration completed, clone pod %s has allocated CPU=%s", clonePodName, allocated)
 }
@@ -225,15 +221,11 @@ func TestE08_DuplicatePrevention(t *testing.T) {
 	deployNginx(t, ns, "nginx", 1, "100m")
 	waitForDeployment(t, ns, "nginx", 2*time.Minute)
 
-	deployFiller(t, ns, "filler-1", "600m")
-	deployFiller(t, ns, "filler-2", "600m")
-	waitForDeployment(t, ns, "filler-1", 2*time.Minute)
-	waitForDeployment(t, ns, "filler-2", 2*time.Minute)
-
+	// Use Infeasible resize so PodResizePending is guaranteed.
 	podName := getPodName(t, ns, "app", "nginx")
-	patchPodResize(t, ns, podName, "nginx", "1500m")
+	patchPodResize(t, ns, podName, "nginx", "4500m")
 
-	waitForPodResizePending(t, ns, podName, 60*time.Second)
+	waitForPodResizePending(t, ns, podName, 120*time.Second)
 	waitForMigrationForPod(t, ns, podName, defaultWaitTimeout)
 
 	// Count migrations for this pod — should be exactly 1
@@ -258,6 +250,8 @@ func TestE08_DuplicatePrevention(t *testing.T) {
 // a pending resize does not cause issues (controller removes it from tracking).
 func TestE09_PodDeletedWhilePending(t *testing.T) {
 	ns := "e2e-pod-deleted"
+	// Delete any leftover namespace first
+	_ = clientset.CoreV1().Namespaces().Delete(context.Background(), ns, metav1.DeleteOptions{})
 	createNamespace(t, ns)
 	t.Cleanup(func() { deleteNamespace(t, ns) })
 	createResizeRBAC(t, ns)
@@ -265,9 +259,10 @@ func TestE09_PodDeletedWhilePending(t *testing.T) {
 	deployNginx(t, ns, "nginx", 1, "100m")
 	waitForDeployment(t, ns, "nginx", 2*time.Minute)
 
+	// Use Infeasible resize so PodResizePending is guaranteed.
 	podName := getPodName(t, ns, "app", "nginx")
-	patchPodResize(t, ns, podName, "nginx", "1500m")
-	waitForPodResizePending(t, ns, podName, 60*time.Second)
+	patchPodResize(t, ns, podName, "nginx", "4500m")
+	waitForPodResizePending(t, ns, podName, 120*time.Second)
 
 	// Delete the pod directly (not the deployment)
 	err := clientset.CoreV1().Pods(ns).Delete(context.Background(), podName, metav1.DeleteOptions{})

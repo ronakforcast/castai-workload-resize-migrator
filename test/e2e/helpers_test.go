@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -229,39 +230,38 @@ func patchPodResize(t *testing.T, ns, podName, containerName, cpu string) {
 	t.Helper()
 	ctx := context.Background()
 
+	// Must include memory in the patch — Kubernetes rejects patches that
+	// omit existing resource requests (treats omission as removal).
 	patchJSON := fmt.Sprintf(
-		`{"spec":{"containers":[{"name":"%s","resources":{"requests":{"cpu":"%s"}}}]}}`,
+		`{"spec":{"containers":[{"name":"%s","resources":{"requests":{"cpu":"%s","memory":"128Mi"}}}]}}`,
 		containerName, cpu,
 	)
 
-	// Create a curl pod that patches the target pod via the in-cluster API
-	patcherName := fmt.Sprintf("patcher-%d", time.Now().UnixNano())
-	_, err := clientset.CoreV1().Pods(ns).Create(ctx, &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: patcherName, Namespace: ns},
-		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
-			Containers: []corev1.Container{
-				{
-					Name:    "curl",
-					Image:   curlImage,
-					Command: []string{"/bin/sh", "-c"},
-					Args: []string{fmt.Sprintf(
-						`curl -s -k -X PATCH https://kubernetes.default.svc/api/v1/namespaces/%s/pods/%s/resize `+
-							`-H "Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" `+
-							`-H "Content-Type: application/strategic-merge-patch+json" `+
-							`-d '%s'`,
-						ns, podName, patchJSON,
-					)},
-				},
-			},
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		t.Fatalf("create patcher pod: %v", err)
+	// Use the REST client directly — the typed Patch() method doesn't
+	// correctly handle the /resize subresource content type.
+	result := clientset.CoreV1().RESTClient().
+		Patch(types.StrategicMergePatchType).
+		Resource("pods").
+		Namespace(ns).
+		Name(podName).
+		SubResource("resize").
+		Body([]byte(patchJSON)).
+		Do(ctx)
+	if result.Error() != nil {
+		t.Fatalf("failed to patch pod %s/%s resize: %v", ns, podName, result.Error())
 	}
 
-	// Wait for patcher to complete
-	waitPodCompleted(t, ns, patcherName, 60*time.Second)
+	// Verify the patch was applied.
+	pod, err := clientset.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod after patch: %v", err)
+	}
+	specCPU := pod.Spec.Containers[0].Resources.Requests.Cpu().String()
+	t.Logf("patched pod %s/%s CPU to %s via /resize (spec now: %s)", ns, podName, cpu, specCPU)
+
+	if specCPU != cpu {
+		t.Fatalf("patch did not apply: expected spec CPU=%s, got %s", cpu, specCPU)
+	}
 }
 
 func waitPodCompleted(t *testing.T, ns, name string, timeout time.Duration) {
