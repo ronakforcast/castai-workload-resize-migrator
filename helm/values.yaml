@@ -17,11 +17,8 @@ config:
   # -- If true, logs what migrations would be created but does not create CRDs
   dryRun: true
 
-  # -- How long a resize must be pending before triggering migration
+  # -- How long a Deferred resize must be pending before triggering migration
   pendingThreshold: "2m"
-
-  # -- Minimum pending delta / node allocatable CPU ratio (0.15 = 15%)
-  nodeDeltaThreshold: "0.15"
 
   # -- How often the safety scan runs as a fallback (default 1m)
   safetyScanInterval: "1m"

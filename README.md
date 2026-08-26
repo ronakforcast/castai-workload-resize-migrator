@@ -33,13 +33,14 @@ This controller focuses only on **detecting the stuck resize** and **triggering 
 ```mermaid
 flowchart LR
     WOOP[WOOP recommends CPU upsize] --> Pod[Pod patched via /resize]
-    Pod --> Controller{desired > allocated?}
-    Controller -->|Yes| SafetyScan[Safety Scan every 1 min]
+    Pod --> Kubelet{Kubelet sets PodResizePending=True?}
+    Kubelet -->|Yes| Controller[Controller detects via informer]
+    Controller --> SafetyScan[Safety Scan every 1 min]
     SafetyScan --> Migrator[Create Migration CRD]
     Migrator --> CLM[CLM + Autoscaler]
     CLM --> NewNode[New node provisioned]
     NewNode --> Migrated[Pod migrated, resize applied]
-    Controller -->|No| Skip[Ignore pod]
+    Kubelet -->|No| Skip[Ignore pod]
 ```
 
 ### Component diagram
@@ -47,11 +48,12 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph Controller[Controller Pod]
-        Informers[Informers - Watch Pods & Nodes]
+        Informers[Informers - Watch Pods]
         Detector[Detector
 - Filter on migration-enabled label
-- Compare desired vs allocated
-- Aggregate per node]
+- Check PodResizePending condition
+- Infeasible = immediate
+- Deferred = wait for threshold]
         Migrator[Migrator
 - Create Migration CRD
 - Track status
@@ -61,25 +63,22 @@ flowchart TB
 - Migration CRD API]
         SafetyScan[Safety Scan
 - Runs every 1 min
-- Refreshes node CPU sums
 - Fallback for event-driven detection]
-        
+
         Informers --> Detector
         Detector --> Migrator
         Migrator --> DynamicClient
         SafetyScan --> Detector
         SafetyScan --> Migrator
     end
-    
+
     subgraph K8s[Kubernetes API]
-        Pods[Pods]
-        Nodes[Nodes]
+        Pods[Pods with PodResizePending condition]
         MigrationCRD[Migration CRD
 live.cast.ai/v1]
     end
-    
+
     Informers --> Pods
-    Informers --> Nodes
     DynamicClient --> MigrationCRD
 ```
 
@@ -90,18 +89,18 @@ flowchart TD
     Start[Pod Update via informer] --> Label{Has live.cast.ai/
 migration-enabled=true?}
     Label -->|No| Skip[Skip - ignore pod]
-    Label -->|Yes| Resize{spec.requests.cpu >
-allocatedResources.cpu?}
-    Resize -->|No| Remove[Remove from pending set]
-    Resize -->|Yes| Threshold{Pending for >
+    Label -->|Yes| Condition{PodResizePending=True?}
+    Condition -->|No| Remove[Remove from pending set]
+    Condition -->|Yes| Reason{Reason?}
+    Reason -->|Infeasible| Immediate[Add to pending immediately
+node can never fit the resize]
+    Reason -->|Deferred| Threshold{Pending for >
 PendingThreshold?}
-    Threshold -->|No| Wait[Wait - not yet]
-    Threshold -->|Yes| SafetyScan[Safety Scan every 1 min]
-    SafetyScan --> NodeCheck{Node available CPU <
-pending delta?}
-    NodeCheck -->|No| HasRoom[Node has room -
-no migration needed]
-    NodeCheck -->|Yes| Active{Migration already
+    Threshold -->|No| Wait[Wait - node might free up]
+    Threshold -->|Yes| Add[Add to pending set]
+    Immediate --> SafetyScan[Safety Scan every 1 min]
+    Add --> SafetyScan
+    SafetyScan --> Active{Migration already
 active for pod?}
     Active -->|Yes| RetryCheck{Failed &
 retryable?}
@@ -123,12 +122,12 @@ stateDiagram-v2
     Running --> Completed: Migration succeeds
     Running --> Failed: Restore fails
     WaitingForCapacity --> Failed: Timeout 10 min
-    
+
     Completed --> [*]: Controller removes from tracking
     Failed --> Retry: If retryCount < limit
     Retry --> Created: New migration created
     Failed --> [*]: If retryCount >= limit
-    
+
     note right of Completed
         Controller polls status
         every 30 seconds
@@ -145,14 +144,15 @@ stateDiagram-v2
 
 1. **Watches all pods** via Kubernetes informers.
 2. **Filters** on `live.cast.ai/migration-enabled=true` label (auto-added by CLM to eligible pods).
-3. **Detects** pods where `spec.containers[].resources.requests.cpu` (desired) > `status.containerStatuses[].allocatedResources.cpu` (allocated).
-4. **Waits** for a configurable pending threshold (default 2 minutes).
+3. **Checks `PodResizePending` condition** — set by kubelet when an in-place resize cannot be applied.
+4. **Distinguishes by reason**:
+   - `Infeasible` — requested CPU exceeds node's total capacity. The resize can **never** succeed on this node. Added to pending immediately, no threshold wait.
+   - `Deferred` — node is temporarily full but could fit the resize later. Waits for `PENDING_THRESHOLD` (default 2m) before adding to pending, giving the node a chance to free up.
 5. **Safety scan** runs every 1 minute (configurable) as a fallback:
-   - Aggregates pending CPU delta per node.
-   - Flags pods on nodes that cannot fit the delta.
-6. **Creates** a `live.cast.ai/v1 Migration` CRD for each suspect pod.
-7. **Tracks** migration status and retries on failure (up to `MIGRATION_RETRY_LIMIT`).
-8. **Cleans up** completed or permanently failed migrations from tracking.
+   - Collects all pending pods that have crossed their threshold.
+   - Creates a `Migration` CRD for each suspect pod.
+6. **Tracks** migration status and retries on failure (up to `MIGRATION_RETRY_LIMIT`).
+7. **Cleans up** completed or permanently failed migrations from tracking.
 
 ---
 
@@ -222,8 +222,7 @@ kubectl apply -f k8s/deployment.yaml
 | `replicaCount` | `1` | Number of replicas (leader election ensures single active) |
 | `namespace` | `castai-workload-resize-migrator` | Namespace to deploy into |
 | `config.dryRun` | `true` | If true, logs migrations but does not create CRDs |
-| `config.pendingThreshold` | `2m` | How long a resize must be pending before triggering migration |
-| `config.nodeDeltaThreshold` | `0.15` | Minimum pending delta / node allocatable CPU ratio (15%) |
+| `config.pendingThreshold` | `2m` | How long a Deferred resize must be pending before triggering migration. Infeasible resizes skip this wait. |
 | `config.safetyScanInterval` | `1m` | How often the safety scan runs as a fallback |
 | `config.migrationTimeout` | `10m` | How long a migration is considered active before expiring |
 | `config.migrationRetryLimit` | `3` | Max retries per failed migration |
@@ -242,7 +241,6 @@ kubectl apply -f k8s/deployment.yaml
 config:
   dryRun: false
   pendingThreshold: "1m"
-  nodeDeltaThreshold: "0.10"
   safetyScanInterval: "30s"
   migrationTimeout: "5m"
   migrationRetryLimit: 5
@@ -292,11 +290,10 @@ helm install castai-workload-resize-migrator ./helm \
 | Migration fails with `PodSchedulingFailed` | Ensure source and destination nodes are in the **same AZ** (single subnet in node config) |
 | Migration fails with `SubnetMismatch` | Add `topology.cast.ai/subnet-id` label to EKS-managed nodes, or use only CLM-provisioned nodes |
 | Capacity pod stuck Pending | Ensure the CLM node template allows large enough instances for the desired CPU |
-| Controller detects no suspect pods | Ensure pods have `resizePolicy` and `allocatedResources` in their status (requires in-place resize support) |
+| Controller detects no suspect pods | Ensure pods have `resizePolicy` and `PodResizePending` condition (requires in-place resize support) |
 | Controller detects no suspect pods | Ensure pods have `live.cast.ai/migration-enabled=true` label (CLM adds this automatically to eligible pods) |
 | Autoscaler doesn't provision nodes | Ensure **Unschedulable Pods** policy is enabled in CAST AI autoscaler settings |
 | Migration keeps failing and retrying | Check if desired CPU fits on the destination node after ~500m system overhead |
-| Controller logs noise from capacity pods | Capacity pods inherit the `migration-enabled` label but are on nodes with room, so no migrations are created. Log noise is expected. |
 
 ---
 
@@ -307,7 +304,7 @@ castai-workload-resize-migrator/
 ├── cmd/castai-workload-resize-migrator/   # Main entry point
 ├── pkg/
 │   ├── config/                            # Environment-based config
-│   ├── detector/                          # Pending resize detection
+│   ├── detector/                          # PodResizePending condition detection
 │   └── migrator/                          # CAST AI Migration CRD creation + status tracking
 ├── helm/                                  # Helm chart
 │   ├── Chart.yaml

@@ -88,8 +88,6 @@ spec:
               value: {{ .Values.config.dryRun | quote }}
             - name: PENDING_THRESHOLD
               value: {{ .Values.config.pendingThreshold | quote }}
-            - name: NODE_DELTA_THRESHOLD
-              value: {{ .Values.config.nodeDeltaThreshold | quote }}
             - name: SAFETY_SCAN_INTERVAL
               value: {{ .Values.config.safetyScanInterval | quote }}
             - name: MIGRATION_TIMEOUT

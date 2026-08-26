@@ -8,7 +8,7 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	for _, k := range []string{
-		"DRY_RUN", "PENDING_THRESHOLD", "NODE_DELTA_THRESHOLD",
+		"DRY_RUN", "PENDING_THRESHOLD",
 		"SAFETY_SCAN_INTERVAL", "MIGRATION_TIMEOUT", "MIGRATION_RETRY_LIMIT",
 		"MIGRATION_RETRY_DELAY", "MIGRATION_ALERT_THRESHOLD", "CLM_NODE_TEMPLATE",
 	} {
@@ -22,9 +22,6 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.PendingThreshold != 2*time.Minute {
 		t.Fatalf("expected PendingThreshold=2m by default, got %v", cfg.PendingThreshold)
-	}
-	if cfg.NodeDeltaThreshold != 0.15 {
-		t.Fatalf("expected NodeDeltaThreshold=0.15 by default, got %v", cfg.NodeDeltaThreshold)
 	}
 	if cfg.SafetyScanInterval != 1*time.Minute {
 		t.Fatalf("expected SafetyScanInterval=1m by default, got %v", cfg.SafetyScanInterval)
@@ -50,7 +47,6 @@ func TestLoadOverrides(t *testing.T) {
 	setenvs := map[string]string{
 		"DRY_RUN":                    "false",
 		"PENDING_THRESHOLD":           "30s",
-		"NODE_DELTA_THRESHOLD":        "0.10",
 		"SAFETY_SCAN_INTERVAL":        "2m",
 		"MIGRATION_TIMEOUT":           "5m",
 		"MIGRATION_RETRY_LIMIT":       "5",
@@ -74,9 +70,6 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.PendingThreshold != 30*time.Second {
 		t.Fatalf("expected PendingThreshold=30s, got %v", cfg.PendingThreshold)
-	}
-	if cfg.NodeDeltaThreshold != 0.10 {
-		t.Fatalf("expected NodeDeltaThreshold=0.10, got %v", cfg.NodeDeltaThreshold)
 	}
 	if cfg.SafetyScanInterval != 2*time.Minute {
 		t.Fatalf("expected SafetyScanInterval=2m, got %v", cfg.SafetyScanInterval)
@@ -117,16 +110,6 @@ func TestLoadInvalidDurationFallsBack(t *testing.T) {
 	cfg := Load()
 	if cfg.PendingThreshold != 2*time.Minute {
 		t.Fatalf("expected fallback PendingThreshold=2m, got %v", cfg.PendingThreshold)
-	}
-}
-
-func TestLoadInvalidFloatFallsBack(t *testing.T) {
-	os.Setenv("NODE_DELTA_THRESHOLD", "bad")
-	defer os.Unsetenv("NODE_DELTA_THRESHOLD")
-
-	cfg := Load()
-	if cfg.NodeDeltaThreshold != 0.15 {
-		t.Fatalf("expected fallback NodeDeltaThreshold=0.15, got %v", cfg.NodeDeltaThreshold)
 	}
 }
 

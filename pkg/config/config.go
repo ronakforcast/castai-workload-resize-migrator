@@ -13,7 +13,6 @@ import (
 type Config struct {
 	DryRun                  bool
 	PendingThreshold        time.Duration
-	NodeDeltaThreshold      float64 // 0.15 = 15%
 	SafetyScanInterval      time.Duration
 	MigrationTimeout        time.Duration
 	MigrationRetryLimit     int
@@ -31,7 +30,6 @@ func Load() Config {
 	return Config{
 		DryRun:                  getBool("DRY_RUN", true),
 		PendingThreshold:        getDuration("PENDING_THRESHOLD", 2*time.Minute),
-		NodeDeltaThreshold:      getFloat("NODE_DELTA_THRESHOLD", 0.15),
 		SafetyScanInterval:      getDuration("SAFETY_SCAN_INTERVAL", 1*time.Minute),
 		MigrationTimeout:        getDuration("MIGRATION_TIMEOUT", 10*time.Minute),
 		MigrationRetryLimit:     getInt("MIGRATION_RETRY_LIMIT", 3),

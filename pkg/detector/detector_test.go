@@ -1,7 +1,6 @@
 package detector
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -10,208 +9,118 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestExtractResizeStatus(t *testing.T) {
-	d := New(nil, config.Config{})
-	pod := &corev1.Pod{
+func podWithResizePending(reason, message string, labels map[string]string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "resize-test",
+			Namespace: "default",
+			Labels:    labels,
+		},
 		Spec: corev1.PodSpec{
 			NodeName: "node-1",
 			Containers: []corev1.Container{
 				{
-					Name: "stress",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("800m"),
-							corev1.ResourceMemory: resource.MustParse("128Mi"),
-						},
-					},
-				},
-			},
-		},
-		Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name: "stress",
-					AllocatedResources: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("100m"),
-						corev1.ResourceMemory: resource.MustParse("128Mi"),
-					},
-					Resources: &corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    resource.MustParse("100m"),
-							corev1.ResourceMemory: resource.MustParse("128Mi"),
-						},
-					},
-				},
-			},
-		},
-	}
-
-	desired, allocated, pending := d.extractResizeStatus(pod)
-	if !pending {
-		t.Fatalf("expected pending resize")
-	}
-	if desired != 800 {
-		t.Fatalf("expected desired 800m, got %d", desired)
-	}
-	if allocated != 100 {
-		t.Fatalf("expected allocated 100m, got %d", allocated)
-	}
-}
-
-func TestExtractResizeStatusNoPending(t *testing.T) {
-	d := New(nil, config.Config{})
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name: "stress",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("100m"),
-						},
-					},
-				},
-			},
-		},
-		Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name: "stress",
-					AllocatedResources: corev1.ResourceList{
-						corev1.ResourceCPU: resource.MustParse("100m"),
-					},
-					Resources: &corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("100m"),
-						},
-					},
-				},
-			},
-		},
-	}
-
-	desired, allocated, pending := d.extractResizeStatus(pod)
-	if pending {
-		t.Fatalf("expected no pending resize, got desired=%d allocated=%d", desired, allocated)
-	}
-	if desired != 0 || allocated != 0 {
-		t.Fatalf("expected desired=0 allocated=0, got %d/%d", desired, allocated)
-	}
-}
-
-func TestExtractResizeStatusResizeApplied(t *testing.T) {
-	d := New(nil, config.Config{})
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name: "stress",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("400m"),
-						},
-					},
-				},
-			},
-		},
-		Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name: "stress",
-					AllocatedResources: corev1.ResourceList{
-						corev1.ResourceCPU: resource.MustParse("400m"),
-					},
-					Resources: &corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("400m"),
-						},
-					},
-				},
-			},
-		},
-	}
-
-	desired, allocated, pending := d.extractResizeStatus(pod)
-	if pending {
-		t.Fatalf("expected no pending resize after applied, got desired=%d allocated=%d", desired, allocated)
-	}
-}
-
-func TestExtractResizeStatusMultiContainer(t *testing.T) {
-	d := New(nil, config.Config{})
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
 					Name: "app",
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("300m"),
-						},
-					},
-				},
-				{
-					Name: "sidecar",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("100m"),
+							corev1.ResourceCPU: resource.MustParse("1500m"),
 						},
 					},
 				},
 			},
 		},
 		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{
+					Type:    corev1.PodResizePending,
+					Status:  corev1.ConditionTrue,
+					Reason:  reason,
+					Message: message,
+				},
+			},
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
 					Name: "app",
 					AllocatedResources: corev1.ResourceList{
 						corev1.ResourceCPU: resource.MustParse("100m"),
 					},
-				},
-				{
-					Name: "sidecar",
-					AllocatedResources: corev1.ResourceList{
-						corev1.ResourceCPU: resource.MustParse("50m"),
+					Resources: &corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("100m"),
+						},
 					},
 				},
 			},
 		},
 	}
+}
 
-	desired, allocated, pending := d.extractResizeStatus(pod)
-	if !pending {
-		t.Fatal("expected pending resize")
-	}
-	if desired != 400 {
-		t.Fatalf("expected desired=400, got %d", desired)
-	}
-	if allocated != 150 {
-		t.Fatalf("expected allocated=150, got %d", allocated)
+func migrationLabels() map[string]string {
+	return map[string]string{
+		"live.cast.ai/migration-enabled": "true",
 	}
 }
 
-func TestExtractResizeStatusDownsizeIgnored(t *testing.T) {
+func TestExtractResizeStatusDeferred(t *testing.T) {
+	d := New(nil, config.Config{})
+	pod := podWithResizePending("Deferred", "Node didn't have enough resource: cpu, requested: 1500, used: 1450, capacity: 1930", migrationLabels())
+
+	reason, message, pending := d.extractResizeStatus(pod)
+	if !pending {
+		t.Fatal("expected pending=true")
+	}
+	if reason != "Deferred" {
+		t.Fatalf("expected reason=Deferred, got %s", reason)
+	}
+	if message == "" {
+		t.Fatal("expected non-empty message")
+	}
+}
+
+func TestExtractResizeStatusInfeasible(t *testing.T) {
+	d := New(nil, config.Config{})
+	pod := podWithResizePending("Infeasible", "Node didn't have enough capacity: cpu, requested: 2500, capacity: 1930", migrationLabels())
+
+	reason, message, pending := d.extractResizeStatus(pod)
+	if !pending {
+		t.Fatal("expected pending=true")
+	}
+	if reason != "Infeasible" {
+		t.Fatalf("expected reason=Infeasible, got %s", reason)
+	}
+	if message == "" {
+		t.Fatal("expected non-empty message")
+	}
+}
+
+func TestExtractResizeStatusNotPending(t *testing.T) {
 	d := New(nil, config.Config{})
 	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "resize-test",
+			Namespace: "default",
+			Labels:    migrationLabels(),
+		},
 		Spec: corev1.PodSpec{
+			NodeName: "node-1",
 			Containers: []corev1.Container{
 				{
-					Name: "stress",
+					Name: "app",
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("50m"),
+							corev1.ResourceCPU: resource.MustParse("100m"),
 						},
 					},
 				},
 			},
 		},
 		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{},
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
-					Name: "stress",
+					Name: "app",
 					AllocatedResources: corev1.ResourceList{
 						corev1.ResourceCPU: resource.MustParse("100m"),
 					},
@@ -222,7 +131,187 @@ func TestExtractResizeStatusDownsizeIgnored(t *testing.T) {
 
 	_, _, pending := d.extractResizeStatus(pod)
 	if pending {
-		t.Fatal("expected downsize to be ignored")
+		t.Fatal("expected pending=false for pod without PodResizePending condition")
+	}
+}
+
+func TestExtractResizeStatusConditionFalse(t *testing.T) {
+	d := New(nil, config.Config{})
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "resize-test",
+			Namespace: "default",
+			Labels:    migrationLabels(),
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{
+					Type:   corev1.PodResizePending,
+					Status: corev1.ConditionFalse,
+					Reason: "Deferred",
+				},
+			},
+		},
+	}
+
+	_, _, pending := d.extractResizeStatus(pod)
+	if pending {
+		t.Fatal("expected pending=false when condition status is False")
+	}
+}
+
+func TestOnPodChangeFiltersNonMigrationLabel(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	pod := podWithResizePending("Deferred", "test", map[string]string{"app": "nginx"})
+
+	d.OnPodChange(pod)
+	time.Sleep(5 * time.Millisecond)
+	d.OnPodChange(pod)
+
+	if len(d.pendingPods) != 0 {
+		t.Fatalf("expected 0 pending pods for non-migration-enabled pod, got %d", len(d.pendingPods))
+	}
+}
+
+func TestOnPodChangeDeferredWaitsForThreshold(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 50 * time.Millisecond})
+	pod := podWithResizePending("Deferred", "test", migrationLabels())
+
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 0 {
+		t.Fatal("expected pod not added before threshold")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 1 {
+		t.Fatalf("expected pod added after threshold, got %d", len(d.pendingPods))
+	}
+}
+
+func TestOnPodChangeInfeasibleAddedImmediately(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
+	pod := podWithResizePending("Infeasible", "Node didn't have enough capacity", migrationLabels())
+
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 1 {
+		t.Fatalf("expected Infeasible pod added immediately, got %d pending pods", len(d.pendingPods))
+	}
+}
+
+func TestOnPodChangeNoLongerPending(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	pod := podWithResizePending("Deferred", "test", migrationLabels())
+
+	d.OnPodChange(pod)
+	time.Sleep(5 * time.Millisecond)
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 1 {
+		t.Fatalf("expected pod pending, got %d", len(d.pendingPods))
+	}
+
+	// Resize applied — remove PodResizePending condition.
+	pod.Status.Conditions = []corev1.PodCondition{}
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 0 {
+		t.Fatalf("expected pod removed after resize applied, got %d", len(d.pendingPods))
+	}
+}
+
+func TestOnPodDelete(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	pod := podWithResizePending("Deferred", "test", migrationLabels())
+
+	d.OnPodChange(pod)
+	time.Sleep(5 * time.Millisecond)
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 1 {
+		t.Fatal("expected pod pending")
+	}
+
+	d.OnPodDelete(pod)
+	if len(d.pendingPods) != 0 {
+		t.Fatal("expected pod removed on delete")
+	}
+}
+
+func TestListSuspectPodsInfeasibleAlwaysSuspect(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
+
+	key := "default/resize-test"
+	d.firstSeen[key] = time.Now().Add(-1 * time.Second)
+	d.pendingPods[key] = &PodPendingInfo{
+		Namespace:    "default",
+		PodName:      "resize-test",
+		NodeName:     "node-1",
+		AllocatedCPU: 100,
+		DesiredCPU:   2500,
+		Reason:       "Infeasible",
+		Message:      "Node didn't have enough capacity",
+		PendingSince: time.Now().Add(-1 * time.Second),
+	}
+
+	suspects := d.ListSuspectPods(nil)
+	if len(suspects) != 1 {
+		t.Fatalf("expected 1 suspect for Infeasible, got %d", len(suspects))
+	}
+	if suspects[0].Reason != "Infeasible" {
+		t.Fatalf("expected reason=Infeasible, got %s", suspects[0].Reason)
+	}
+}
+
+func TestListSuspectPodsDeferredBelowThresholdNotSuspect(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
+
+	key := "default/resize-test"
+	d.firstSeen[key] = time.Now()
+	d.pendingPods[key] = &PodPendingInfo{
+		Namespace:    "default",
+		PodName:      "resize-test",
+		NodeName:     "node-1",
+		AllocatedCPU: 100,
+		DesiredCPU:   1500,
+		Reason:       "Deferred",
+		Message:      "Node didn't have enough resource",
+		PendingSince: time.Now(),
+	}
+
+	suspects := d.ListSuspectPods(nil)
+	if len(suspects) != 0 {
+		t.Fatalf("expected 0 suspects for Deferred below threshold, got %d", len(suspects))
+	}
+}
+
+func TestListSuspectPodsDeferredAboveThresholdIsSuspect(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+
+	key := "default/resize-test"
+	d.firstSeen[key] = time.Now().Add(-1 * time.Hour)
+	d.pendingPods[key] = &PodPendingInfo{
+		Namespace:    "default",
+		PodName:      "resize-test",
+		NodeName:     "node-1",
+		AllocatedCPU: 100,
+		DesiredCPU:   1500,
+		Reason:       "Deferred",
+		Message:      "Node didn't have enough resource",
+		PendingSince: time.Now().Add(-1 * time.Hour),
+	}
+
+	suspects := d.ListSuspectPods(nil)
+	if len(suspects) != 1 {
+		t.Fatalf("expected 1 suspect for Deferred above threshold, got %d", len(suspects))
+	}
+	if suspects[0].Reason != "Deferred" {
+		t.Fatalf("expected reason=Deferred, got %s", suspects[0].Reason)
+	}
+}
+
+func TestListSuspectPodsEmpty(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	suspects := d.ListSuspectPods(nil)
+	if len(suspects) != 0 {
+		t.Fatalf("expected 0 suspects, got %d", len(suspects))
 	}
 }
 
@@ -230,10 +319,10 @@ func TestResolveWorkload(t *testing.T) {
 	d := New(nil, config.Config{})
 
 	tests := []struct {
-		name     string
-		pod      *corev1.Pod
-		expName  string
-		expKind  string
+		name    string
+		pod     *corev1.Pod
+		expName string
+		expKind string
 	}{
 		{
 			name: "Deployment pod",
@@ -280,22 +369,16 @@ func TestResolveWorkload(t *testing.T) {
 	}
 }
 
-func TestOnPodChangePendingThreshold(t *testing.T) {
-	d := New(nil, config.Config{PendingThreshold: 50 * time.Millisecond})
+func TestExtractCPUValues(t *testing.T) {
+	d := New(nil, config.Config{})
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "resize-test",
-			Namespace: "default",
-			Labels:    map[string]string{"live.cast.ai/migration-enabled": "true"},
-		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-1",
 			Containers: []corev1.Container{
 				{
 					Name: "app",
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("400m"),
+							corev1.ResourceCPU: resource.MustParse("1500m"),
 						},
 					},
 				},
@@ -313,34 +396,33 @@ func TestOnPodChangePendingThreshold(t *testing.T) {
 		},
 	}
 
-	d.OnPodChange(pod)
-	if len(d.pendingPods) != 0 {
-		t.Fatal("expected pod not added before threshold")
+	desired, allocated := d.extractCPUValues(pod)
+	if desired != 1500 {
+		t.Fatalf("expected desired=1500, got %d", desired)
 	}
-
-	time.Sleep(100 * time.Millisecond)
-	d.OnPodChange(pod)
-	if len(d.pendingPods) != 1 {
-		t.Fatalf("expected pod added after threshold, got %d", len(d.pendingPods))
+	if allocated != 100 {
+		t.Fatalf("expected allocated=100, got %d", allocated)
 	}
 }
 
-func TestOnPodChangeNoLongerPending(t *testing.T) {
-	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+func TestExtractCPUValuesMultiContainer(t *testing.T) {
+	d := New(nil, config.Config{})
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "resize-test",
-			Namespace: "default",
-			Labels:    map[string]string{"live.cast.ai/migration-enabled": "true"},
-		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-1",
 			Containers: []corev1.Container{
 				{
 					Name: "app",
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("400m"),
+							corev1.ResourceCPU: resource.MustParse("800m"),
+						},
+					},
+				},
+				{
+					Name: "sidecar",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("200m"),
 						},
 					},
 				},
@@ -354,269 +436,21 @@ func TestOnPodChangeNoLongerPending(t *testing.T) {
 						corev1.ResourceCPU: resource.MustParse("100m"),
 					},
 				},
-			},
-		},
-	}
-
-	d.OnPodChange(pod)
-	time.Sleep(5 * time.Millisecond)
-	d.OnPodChange(pod)
-	if len(d.pendingPods) != 1 {
-		t.Fatalf("expected pod pending, got %d", len(d.pendingPods))
-	}
-
-	// Resize applied.
-	pod.Status.ContainerStatuses[0].AllocatedResources = corev1.ResourceList{
-		corev1.ResourceCPU: resource.MustParse("400m"),
-	}
-	d.OnPodChange(pod)
-	if len(d.pendingPods) != 0 {
-		t.Fatalf("expected pod removed after resize applied, got %d", len(d.pendingPods))
-	}
-}
-
-func TestOnPodDelete(t *testing.T) {
-	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "resize-test",
-			Namespace: "default",
-			Labels:    map[string]string{"live.cast.ai/migration-enabled": "true"},
-		},
-		Spec: corev1.PodSpec{
-			NodeName: "node-1",
-			Containers: []corev1.Container{
 				{
-					Name: "app",
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("400m")},
+					Name: "sidecar",
+					AllocatedResources: corev1.ResourceList{
+						corev1.ResourceCPU: resource.MustParse("50m"),
 					},
 				},
 			},
 		},
-		Status: corev1.PodStatus{
-			ContainerStatuses: []corev1.ContainerStatus{
-				{
-					Name: "app",
-					AllocatedResources: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
-				},
-			},
-		},
 	}
 
-	d.OnPodChange(pod)
-	time.Sleep(5 * time.Millisecond)
-	d.OnPodChange(pod)
-	if len(d.pendingPods) != 1 {
-		t.Fatal("expected pod pending")
+	desired, allocated := d.extractCPUValues(pod)
+	if desired != 1000 {
+		t.Fatalf("expected desired=1000, got %d", desired)
 	}
-
-	d.OnPodDelete(pod)
-	if len(d.pendingPods) != 0 {
-		t.Fatal("expected pod removed on delete")
-	}
-}
-
-func TestListSuspectPodsDeltaBelowThreshold(t *testing.T) {
-	d := New(nil, config.Config{
-		PendingThreshold:   1 * time.Millisecond,
-		NodeDeltaThreshold: 0.15,
-	})
-
-	d.nodes["node-1"] = &NodeInfo{Name: "node-1", AllocatableCPU: 1930, Pods: make(map[string]*PodPendingInfo)}
-	d.nodePodSum["node-1"] = 1800
-
-	key := "default/resize-test"
-	d.firstSeen[key] = time.Now().Add(-time.Hour)
-	d.pendingPods[key] = &PodPendingInfo{
-		Namespace:    "default",
-		PodName:      "resize-test",
-		NodeName:     "node-1",
-		AllocatedCPU: 100,
-		DesiredCPU:   110,
-		PendingSince: time.Now().Add(-time.Hour),
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 0 {
-		t.Fatalf("expected no suspects below threshold, got %v", suspects)
-	}
-}
-
-func TestListSuspectPodsHasEnoughRoom(t *testing.T) {
-	d := New(nil, config.Config{
-		PendingThreshold:   1 * time.Millisecond,
-		NodeDeltaThreshold: 0.10,
-	})
-
-	d.nodes["node-1"] = &NodeInfo{Name: "node-1", AllocatableCPU: 1930, Pods: make(map[string]*PodPendingInfo)}
-	d.nodePodSum["node-1"] = 1000
-
-	key := "default/resize-test"
-	d.firstSeen[key] = time.Now().Add(-time.Hour)
-	d.pendingPods[key] = &PodPendingInfo{
-		Namespace:    "default",
-		PodName:      "resize-test",
-		NodeName:     "node-1",
-		AllocatedCPU: 100,
-		DesiredCPU:   400,
-		PendingSince: time.Now().Add(-time.Hour),
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 0 {
-		t.Fatalf("expected no suspects when node has room, got %v", suspects)
-	}
-}
-
-func TestListSuspectPodsMultiplePods(t *testing.T) {
-	d := New(nil, config.Config{
-		PendingThreshold:   1 * time.Millisecond,
-		NodeDeltaThreshold: 0.10,
-	})
-
-	d.nodes["node-1"] = &NodeInfo{Name: "node-1", AllocatableCPU: 1930, Pods: make(map[string]*PodPendingInfo)}
-	d.nodePodSum["node-1"] = 2100
-
-	for i, key := range []string{"default/pod-a", "default/pod-b"} {
-		d.firstSeen[key] = time.Now().Add(-time.Hour)
-		d.pendingPods[key] = &PodPendingInfo{
-			Namespace:    "default",
-			PodName:      []string{"pod-a", "pod-b"}[i],
-			NodeName:     "node-1",
-			AllocatedCPU: 100,
-			DesiredCPU:   250,
-			PendingSince: time.Now().Add(-time.Hour),
-		}
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 2 {
-		t.Fatalf("expected 2 suspects, got %v", suspects)
-	}
-}
-
-func TestListSuspectPodsNodeAllocatableZero(t *testing.T) {
-	d := New(nil, config.Config{
-		PendingThreshold:   1 * time.Millisecond,
-		NodeDeltaThreshold: 0.10,
-	})
-
-	d.nodes["node-1"] = &NodeInfo{Name: "node-1", AllocatableCPU: 0, Pods: make(map[string]*PodPendingInfo)}
-	d.nodePodSum["node-1"] = 0
-
-	key := "default/resize-test"
-	d.firstSeen[key] = time.Now().Add(-time.Hour)
-	d.pendingPods[key] = &PodPendingInfo{
-		Namespace:    "default",
-		PodName:      "resize-test",
-		NodeName:     "node-1",
-		AllocatedCPU: 100,
-		DesiredCPU:   400,
-		PendingSince: time.Now().Add(-time.Hour),
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 0 {
-		t.Fatalf("expected no suspects with zero allocatable, got %v", suspects)
-	}
-}
-
-func TestListSuspectPodsUnknownNode(t *testing.T) {
-	d := New(nil, config.Config{
-		PendingThreshold:   1 * time.Millisecond,
-		NodeDeltaThreshold: 0.10,
-	})
-
-	key := "default/resize-test"
-	d.firstSeen[key] = time.Now().Add(-time.Hour)
-	d.pendingPods[key] = &PodPendingInfo{
-		Namespace:    "default",
-		PodName:      "resize-test",
-		NodeName:     "unknown-node",
-		AllocatedCPU: 100,
-		DesiredCPU:   400,
-		PendingSince: time.Now().Add(-time.Hour),
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 0 {
-		t.Fatalf("expected no suspects for unknown node, got %v", suspects)
-	}
-}
-
-func TestRefreshNodePodSum(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset(
-		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "running-1", Namespace: "default"},
-			Spec: corev1.PodSpec{
-				NodeName: "node-1",
-				Containers: []corev1.Container{
-					{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}}},
-				},
-			},
-			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		},
-		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "running-2", Namespace: "default"},
-			Spec: corev1.PodSpec{
-				NodeName: "node-1",
-				Containers: []corev1.Container{
-					{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")}}},
-				},
-			},
-			Status: corev1.PodStatus{Phase: corev1.PodRunning},
-		},
-		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "default"},
-			Spec: corev1.PodSpec{
-				NodeName: "node-1",
-				Containers: []corev1.Container{
-					{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")}}},
-				},
-			},
-			Status: corev1.PodStatus{Phase: corev1.PodPending},
-		},
-	)
-
-	d := New(fakeClient, config.Config{})
-	if err := d.RefreshNodePodSum(context.Background()); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if d.nodePodSum["node-1"] != 300 {
-		t.Fatalf("expected node-1 sum=300, got %d", d.nodePodSum["node-1"])
-	}
-}
-
-func TestListSuspectPods(t *testing.T) {
-	d := New(nil, config.Config{
-		PendingThreshold:   30 * time.Second,
-		NodeDeltaThreshold: 0.15,
-	})
-
-	d.nodes["node-1"] = &NodeInfo{
-		Name:           "node-1",
-		AllocatableCPU: 1930,
-		Pods:           make(map[string]*PodPendingInfo),
-	}
-	d.nodePodSum["node-1"] = 950 + 100 // other pods + target
-
-	key := "woop-test/cpu-stress-target"
-	d.firstSeen[key] = time.Now().Add(-60 * time.Second)
-	d.pendingPods[key] = &PodPendingInfo{
-		Namespace:    "woop-test",
-		PodName:      "cpu-stress-target",
-		WorkloadName: "cpu-stress-target",
-		WorkloadKind: "Deployment",
-		NodeName:     "node-1",
-		AllocatedCPU: 100,
-		DesiredCPU:   2000,
-		PendingSince: time.Now().Add(-60 * time.Second),
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 1 || suspects[0].PodName != "cpu-stress-target" {
-		t.Fatalf("expected cpu-stress-target as suspect, got %v", suspects)
+	if allocated != 150 {
+		t.Fatalf("expected allocated=150, got %d", allocated)
 	}
 }
