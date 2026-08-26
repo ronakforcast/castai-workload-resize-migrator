@@ -34,9 +34,14 @@ type PodPendingInfo struct {
 	PendingSince time.Time
 }
 
+// MigrateFunc is called immediately when a pod qualifies for migration.
+// The detector calls this from OnPodChange — no safety scan delay.
+type MigrateFunc func(ctx context.Context, p *PodPendingInfo) error
+
 type Detector struct {
-	clientset kubernetes.Interface
-	cfg       config.Config
+	clientset   kubernetes.Interface
+	cfg         config.Config
+	migrateFunc MigrateFunc
 
 	mu          sync.RWMutex
 	pendingPods map[string]*PodPendingInfo
@@ -50,6 +55,11 @@ func New(clientset kubernetes.Interface, cfg config.Config) *Detector {
 		pendingPods: make(map[string]*PodPendingInfo),
 		firstSeen:   make(map[string]time.Time),
 	}
+}
+
+// SetMigrateFunc sets the callback used to create migrations immediately.
+func (d *Detector) SetMigrateFunc(fn MigrateFunc) {
+	d.migrateFunc = fn
 }
 
 func (d *Detector) Run(ctx context.Context) {
@@ -80,27 +90,31 @@ func (d *Detector) OnPodChange(pod *corev1.Pod) {
 	}
 
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	if _, ok := d.firstSeen[key]; !ok {
 		d.firstSeen[key] = time.Now()
 	}
 	pendingSince := d.firstSeen[key]
+	d.mu.Unlock()
 
-	// For Infeasible resizes, the pod can never fit on this node.
-	// Skip the threshold wait and trigger immediately.
+	// Determine if this pod qualifies for immediate migration.
+	eligible := false
 	if reason == reasonInfeasible {
-		// Even for Infeasible, we still record firstSeen and add to pending.
-		// The migrator will pick it up on the next safety scan.
-		// But we don't wait for the threshold — add it right away.
+		// Infeasible: node can never fit the resize. Trigger immediately.
+		eligible = true
 	} else {
-		// For Deferred resizes, wait for the threshold before considering
-		// it a real signal. The node might free up on its own.
-		if time.Since(pendingSince) < d.cfg.PendingThreshold {
-			return
+		// Deferred: wait for threshold. Kubelet retries periodically,
+		// so the informer will fire again. Check if threshold has passed.
+		if time.Since(pendingSince) >= d.cfg.PendingThreshold {
+			eligible = true
 		}
 	}
 
+	if !eligible {
+		slog.Debug("pending but not yet eligible", "pod", key, "reason", reason, "pendingFor", time.Since(pendingSince), "threshold", d.cfg.PendingThreshold)
+		return
+	}
+
+	// Pod qualifies — add to pending and trigger migration immediately.
 	desired, allocated := d.extractCPUValues(pod)
 	workloadName, workloadKind := d.resolveWorkload(pod)
 
@@ -116,8 +130,19 @@ func (d *Detector) OnPodChange(pod *corev1.Pod) {
 		Message:      message,
 		PendingSince: pendingSince,
 	}
+
+	d.mu.Lock()
 	d.pendingPods[key] = info
+	d.mu.Unlock()
+
 	slog.Info("detected pending upsize", "pod", key, "allocated", allocated, "desired", desired, "reason", reason, "message", message, "pendingSince", pendingSince)
+
+	// Trigger migration immediately via callback.
+	if d.migrateFunc != nil {
+		if err := d.migrateFunc(context.Background(), info); err != nil {
+			slog.Error("failed to trigger migration", "pod", key, "error", err)
+		}
+	}
 }
 
 func (d *Detector) OnPodDelete(pod *corev1.Pod) {
@@ -140,28 +165,16 @@ func (d *Detector) OnNodeDelete(node *corev1.Node) {
 	// No-op — we don't track nodes anymore.
 }
 
-// ListSuspectPods returns all pending pods that are ready for migration.
-// A pod is ready if:
-//   - It has PodResizePending=True with reason Infeasible (always ready)
-//   - It has PodResizePending=True with reason Deferred AND has been pending
-//     for longer than PendingThreshold
+// ListSuspectPods returns all pending pods. This is used by the fallback
+// safety scan to catch any pods that were missed during informer events
+// (e.g., controller restart, informer cache gap).
 func (d *Detector) ListSuspectPods(ctx context.Context) []*PodPendingInfo {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	var suspects []*PodPendingInfo
-	for key, info := range d.pendingPods {
-		if info.Reason == reasonInfeasible {
-			// Infeasible pods are always candidates — they can never resize on this node.
-			suspects = append(suspects, info)
-			continue
-		}
-
-		// For Deferred pods, check if the threshold has been crossed.
-		pendingSince := d.firstSeen[key]
-		if time.Since(pendingSince) >= d.cfg.PendingThreshold {
-			suspects = append(suspects, info)
-		}
+	for _, info := range d.pendingPods {
+		suspects = append(suspects, info)
 	}
 	return suspects
 }

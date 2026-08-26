@@ -30,7 +30,7 @@ func Load() Config {
 	return Config{
 		DryRun:                  getBool("DRY_RUN", true),
 		PendingThreshold:        getDuration("PENDING_THRESHOLD", 2*time.Minute),
-		SafetyScanInterval:      getDuration("SAFETY_SCAN_INTERVAL", 1*time.Minute),
+		SafetyScanInterval:      getDuration("SAFETY_SCAN_INTERVAL", 2*time.Minute),
 		MigrationTimeout:        getDuration("MIGRATION_TIMEOUT", 10*time.Minute),
 		MigrationRetryLimit:     getInt("MIGRATION_RETRY_LIMIT", 3),
 		MigrationRetryDelay:     getDuration("MIGRATION_RETRY_DELAY", 30*time.Second),

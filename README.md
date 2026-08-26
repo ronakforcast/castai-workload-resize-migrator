@@ -33,9 +33,8 @@ flowchart TD
     WOOP[WOOP recommends CPU upsize] --> Pod[Pod patched via /resize]
     Pod --> Kubelet[Kubelet sets PodResizePending=True]
     Kubelet --> Candidate{Candidate?}
-    Candidate -->|migration-enabled=true<br/>PodResizePending=True<br/>Infeasible or Deferred > threshold| SafetyScan[Safety Scan every 1 min]
+    Candidate -->|migration-enabled=true<br/>PodResizePending=True<br/>Infeasible or Deferred > threshold| Create[Create Migration CRD immediately]
     Candidate -->|No| Skip[Skip pod]
-    SafetyScan --> Create[Create Migration CRD]
     Create --> CLM[CLM provisions node & migrates pod]
     CLM --> Done[Pod on new node, resize applied]
 ```
@@ -44,15 +43,13 @@ flowchart TD
 
 ## How It Works
 
-1. **Watches all pods** via Kubernetes informers.
+1. **Watches all pods** via Kubernetes informers (event-driven).
 2. **Filters** on `live.cast.ai/migration-enabled=true` label (auto-added by CLM to eligible pods).
 3. **Checks `PodResizePending` condition** — set by kubelet when an in-place resize cannot be applied.
 4. **Distinguishes by reason**:
-   - `Infeasible` — requested CPU exceeds node's total capacity. The resize can **never** succeed on this node. Added to pending immediately, no threshold wait.
-   - `Deferred` — node is temporarily full but could fit the resize later. Waits for `PENDING_THRESHOLD` (default 2m) before adding to pending, giving the node a chance to free up.
-5. **Safety scan** runs every 1 minute (configurable) as a fallback:
-   - Collects all pending pods that have crossed their threshold.
-   - Creates a `Migration` CRD for each suspect pod.
+   - `Infeasible` — requested CPU exceeds node's total capacity. The resize can **never** succeed on this node. Migration is triggered **immediately** via informer event — no threshold wait.
+   - `Deferred` — node is temporarily full but could fit the resize later. Waits for `PENDING_THRESHOLD` (default 2m). Kubelet periodically retries Deferred resizes, updating the pod status and re-triggering the informer. When the threshold passes, migration is triggered **immediately** via informer event.
+5. **Safety scan** runs every 2 minutes (configurable) as a **fallback only** — catches any pods missed during controller restart or informer cache gaps. This is NOT the primary trigger.
 6. **Tracks** migration status and retries on failure (up to `MIGRATION_RETRY_LIMIT`).
 7. **Cleans up** completed or permanently failed migrations from tracking.
 
@@ -125,7 +122,7 @@ kubectl apply -f k8s/deployment.yaml
 | `namespace` | `castai-workload-resize-migrator` | Namespace to deploy into |
 | `config.dryRun` | `true` | If true, logs migrations but does not create CRDs |
 | `config.pendingThreshold` | `2m` | How long a Deferred resize must be pending before triggering migration. Infeasible resizes skip this wait. |
-| `config.safetyScanInterval` | `1m` | How often the safety scan runs as a fallback |
+| `config.safetyScanInterval` | `2m` | How often the fallback safety scan runs (NOT the primary trigger — migrations are event-driven) |
 | `config.migrationTimeout` | `10m` | How long a migration is considered active before expiring |
 | `config.migrationRetryLimit` | `3` | Max retries per failed migration |
 | `config.migrationRetryDelay` | `30s` | Minimum delay before retrying a failed migration |

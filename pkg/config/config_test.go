@@ -23,8 +23,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.PendingThreshold != 2*time.Minute {
 		t.Fatalf("expected PendingThreshold=2m by default, got %v", cfg.PendingThreshold)
 	}
-	if cfg.SafetyScanInterval != 1*time.Minute {
-		t.Fatalf("expected SafetyScanInterval=1m by default, got %v", cfg.SafetyScanInterval)
+	if cfg.SafetyScanInterval != 2*time.Minute {
+		t.Fatalf("expected SafetyScanInterval=2m by default, got %v", cfg.SafetyScanInterval)
 	}
 	if cfg.MigrationTimeout != 10*time.Minute {
 		t.Fatalf("expected MigrationTimeout=10m by default, got %v", cfg.MigrationTimeout)
@@ -47,7 +47,7 @@ func TestLoadOverrides(t *testing.T) {
 	setenvs := map[string]string{
 		"DRY_RUN":                    "false",
 		"PENDING_THRESHOLD":           "30s",
-		"SAFETY_SCAN_INTERVAL":        "2m",
+		"SAFETY_SCAN_INTERVAL":        "3m",
 		"MIGRATION_TIMEOUT":           "5m",
 		"MIGRATION_RETRY_LIMIT":       "5",
 		"MIGRATION_RETRY_DELAY":       "1m",
@@ -71,8 +71,8 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.PendingThreshold != 30*time.Second {
 		t.Fatalf("expected PendingThreshold=30s, got %v", cfg.PendingThreshold)
 	}
-	if cfg.SafetyScanInterval != 2*time.Minute {
-		t.Fatalf("expected SafetyScanInterval=2m, got %v", cfg.SafetyScanInterval)
+	if cfg.SafetyScanInterval != 3*time.Minute {
+		t.Fatalf("expected SafetyScanInterval=3m, got %v", cfg.SafetyScanInterval)
 	}
 	if cfg.MigrationTimeout != 5*time.Minute {
 		t.Fatalf("expected MigrationTimeout=5m, got %v", cfg.MigrationTimeout)
@@ -138,8 +138,8 @@ func TestLoadInvalidSafetyScanIntervalFallsBack(t *testing.T) {
 	defer os.Unsetenv("SAFETY_SCAN_INTERVAL")
 
 	cfg := Load()
-	if cfg.SafetyScanInterval != 1*time.Minute {
-		t.Fatalf("expected fallback SafetyScanInterval=1m, got %v", cfg.SafetyScanInterval)
+	if cfg.SafetyScanInterval != 2*time.Minute {
+		t.Fatalf("expected fallback SafetyScanInterval=2m, got %v", cfg.SafetyScanInterval)
 	}
 }
 

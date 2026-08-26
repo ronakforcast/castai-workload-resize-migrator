@@ -20,8 +20,8 @@ config:
   # -- How long a Deferred resize must be pending before triggering migration
   pendingThreshold: "2m"
 
-  # -- How often the safety scan runs as a fallback (default 1m)
-  safetyScanInterval: "1m"
+  # -- How often the fallback safety scan runs (NOT the primary trigger — migrations are event-driven)
+  safetyScanInterval: "2m"
 
   # -- How long a migration is considered active before expiring
   migrationTimeout: "10m"

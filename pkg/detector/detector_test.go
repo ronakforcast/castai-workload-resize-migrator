@@ -1,6 +1,8 @@
 package detector
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,6 +63,26 @@ func migrationLabels() map[string]string {
 	return map[string]string{
 		"live.cast.ai/migration-enabled": "true",
 	}
+}
+
+// fakeMigrateFunc captures calls to the migrate callback.
+type fakeMigrateFunc struct {
+	mu    sync.Mutex
+	calls []*PodPendingInfo
+	err   error
+}
+
+func (f *fakeMigrateFunc) fn(ctx context.Context, p *PodPendingInfo) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, p)
+	return f.err
+}
+
+func (f *fakeMigrateFunc) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
 }
 
 func TestExtractResizeStatusDeferred(t *testing.T) {
@@ -175,11 +197,17 @@ func TestOnPodChangeFiltersNonMigrationLabel(t *testing.T) {
 
 func TestOnPodChangeDeferredWaitsForThreshold(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 50 * time.Millisecond})
+	fake := &fakeMigrateFunc{}
+	d.SetMigrateFunc(fake.fn)
+
 	pod := podWithResizePending("Deferred", "test", migrationLabels())
 
 	d.OnPodChange(pod)
 	if len(d.pendingPods) != 0 {
 		t.Fatal("expected pod not added before threshold")
+	}
+	if fake.callCount() != 0 {
+		t.Fatal("expected no migration call before threshold")
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -187,10 +215,31 @@ func TestOnPodChangeDeferredWaitsForThreshold(t *testing.T) {
 	if len(d.pendingPods) != 1 {
 		t.Fatalf("expected pod added after threshold, got %d", len(d.pendingPods))
 	}
+	if fake.callCount() != 1 {
+		t.Fatalf("expected 1 migration call after threshold, got %d", fake.callCount())
+	}
 }
 
-func TestOnPodChangeInfeasibleAddedImmediately(t *testing.T) {
+func TestOnPodChangeInfeasibleTriggersImmediately(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
+	fake := &fakeMigrateFunc{}
+	d.SetMigrateFunc(fake.fn)
+
+	pod := podWithResizePending("Infeasible", "Node didn't have enough capacity", migrationLabels())
+
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 1 {
+		t.Fatalf("expected Infeasible pod added immediately, got %d pending pods", len(d.pendingPods))
+	}
+	if fake.callCount() != 1 {
+		t.Fatalf("expected 1 migration call immediately for Infeasible, got %d", fake.callCount())
+	}
+}
+
+func TestOnPodChangeInfeasibleNoCallback(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
+	// No migrate func set — should not panic, pod still added to pending.
+
 	pod := podWithResizePending("Infeasible", "Node didn't have enough capacity", migrationLabels())
 
 	d.OnPodChange(pod)
@@ -201,6 +250,9 @@ func TestOnPodChangeInfeasibleAddedImmediately(t *testing.T) {
 
 func TestOnPodChangeNoLongerPending(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	fake := &fakeMigrateFunc{}
+	d.SetMigrateFunc(fake.fn)
+
 	pod := podWithResizePending("Deferred", "test", migrationLabels())
 
 	d.OnPodChange(pod)
@@ -220,6 +272,9 @@ func TestOnPodChangeNoLongerPending(t *testing.T) {
 
 func TestOnPodDelete(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	fake := &fakeMigrateFunc{}
+	d.SetMigrateFunc(fake.fn)
+
 	pod := podWithResizePending("Deferred", "test", migrationLabels())
 
 	d.OnPodChange(pod)
@@ -235,75 +290,23 @@ func TestOnPodDelete(t *testing.T) {
 	}
 }
 
-func TestListSuspectPodsInfeasibleAlwaysSuspect(t *testing.T) {
-	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
-
-	key := "default/resize-test"
-	d.firstSeen[key] = time.Now().Add(-1 * time.Second)
-	d.pendingPods[key] = &PodPendingInfo{
-		Namespace:    "default",
-		PodName:      "resize-test",
-		NodeName:     "node-1",
-		AllocatedCPU: 100,
-		DesiredCPU:   2500,
-		Reason:       "Infeasible",
-		Message:      "Node didn't have enough capacity",
-		PendingSince: time.Now().Add(-1 * time.Second),
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 1 {
-		t.Fatalf("expected 1 suspect for Infeasible, got %d", len(suspects))
-	}
-	if suspects[0].Reason != "Infeasible" {
-		t.Fatalf("expected reason=Infeasible, got %s", suspects[0].Reason)
-	}
-}
-
-func TestListSuspectPodsDeferredBelowThresholdNotSuspect(t *testing.T) {
-	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
-
-	key := "default/resize-test"
-	d.firstSeen[key] = time.Now()
-	d.pendingPods[key] = &PodPendingInfo{
-		Namespace:    "default",
-		PodName:      "resize-test",
-		NodeName:     "node-1",
-		AllocatedCPU: 100,
-		DesiredCPU:   1500,
-		Reason:       "Deferred",
-		Message:      "Node didn't have enough resource",
-		PendingSince: time.Now(),
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 0 {
-		t.Fatalf("expected 0 suspects for Deferred below threshold, got %d", len(suspects))
-	}
-}
-
-func TestListSuspectPodsDeferredAboveThresholdIsSuspect(t *testing.T) {
+func TestListSuspectPodsReturnsAllPending(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
 
-	key := "default/resize-test"
-	d.firstSeen[key] = time.Now().Add(-1 * time.Hour)
-	d.pendingPods[key] = &PodPendingInfo{
-		Namespace:    "default",
-		PodName:      "resize-test",
-		NodeName:     "node-1",
-		AllocatedCPU: 100,
-		DesiredCPU:   1500,
-		Reason:       "Deferred",
-		Message:      "Node didn't have enough resource",
-		PendingSince: time.Now().Add(-1 * time.Hour),
+	d.firstSeen["default/pod-a"] = time.Now().Add(-1 * time.Hour)
+	d.pendingPods["default/pod-a"] = &PodPendingInfo{
+		Namespace: "default", PodName: "pod-a", NodeName: "node-1",
+		Reason: "Infeasible", PendingSince: time.Now().Add(-1 * time.Hour),
+	}
+	d.firstSeen["default/pod-b"] = time.Now().Add(-1 * time.Hour)
+	d.pendingPods["default/pod-b"] = &PodPendingInfo{
+		Namespace: "default", PodName: "pod-b", NodeName: "node-2",
+		Reason: "Deferred", PendingSince: time.Now().Add(-1 * time.Hour),
 	}
 
 	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 1 {
-		t.Fatalf("expected 1 suspect for Deferred above threshold, got %d", len(suspects))
-	}
-	if suspects[0].Reason != "Deferred" {
-		t.Fatalf("expected reason=Deferred, got %s", suspects[0].Reason)
+	if len(suspects) != 2 {
+		t.Fatalf("expected 2 suspects, got %d", len(suspects))
 	}
 }
 
@@ -481,6 +484,9 @@ func TestOnPodChangeNilLabels(t *testing.T) {
 
 func TestOnPodChangeMultipleConditions(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	fake := &fakeMigrateFunc{}
+	d.SetMigrateFunc(fake.fn)
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test",
@@ -504,36 +510,6 @@ func TestOnPodChangeMultipleConditions(t *testing.T) {
 	}
 }
 
-func TestListSuspectPodsMixedInfeasibleAndDeferred(t *testing.T) {
-	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
-
-	// Infeasible — should be returned immediately
-	d.firstSeen["default/pod-a"] = time.Now()
-	d.pendingPods["default/pod-a"] = &PodPendingInfo{
-		Namespace: "default", PodName: "pod-a", NodeName: "node-1",
-		Reason: "Infeasible", PendingSince: time.Now(),
-	}
-
-	// Deferred below threshold — should NOT be returned
-	d.firstSeen["default/pod-b"] = time.Now()
-	d.pendingPods["default/pod-b"] = &PodPendingInfo{
-		Namespace: "default", PodName: "pod-b", NodeName: "node-1",
-		Reason: "Deferred", PendingSince: time.Now(),
-	}
-
-	// Deferred above threshold — should be returned
-	d.firstSeen["default/pod-c"] = time.Now().Add(-1 * time.Hour)
-	d.pendingPods["default/pod-c"] = &PodPendingInfo{
-		Namespace: "default", PodName: "pod-c", NodeName: "node-2",
-		Reason: "Deferred", PendingSince: time.Now().Add(-1 * time.Hour),
-	}
-
-	suspects := d.ListSuspectPods(nil)
-	if len(suspects) != 2 {
-		t.Fatalf("expected 2 suspects (1 Infeasible + 1 Deferred above threshold), got %d", len(suspects))
-	}
-}
-
 func TestExtractCPUValuesMissingAllocatedResources(t *testing.T) {
 	d := New(nil, config.Config{})
 	pod := &corev1.Pod{
@@ -553,7 +529,6 @@ func TestExtractCPUValuesMissingAllocatedResources(t *testing.T) {
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
 					Name: "app",
-					// AllocatedResources is nil, but Resources is set
 					Resources: &corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceCPU: resource.MustParse("100m"),
@@ -583,19 +558,37 @@ func TestOnPodDeleteNilPod(t *testing.T) {
 
 func TestOnPodChangeReasonTransitionsFromDeferredToInfeasible(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
+	fake := &fakeMigrateFunc{}
+	d.SetMigrateFunc(fake.fn)
 
-	// First: Deferred — should NOT be added (below threshold)
+	// First: Deferred — should NOT trigger (below threshold)
 	pod := podWithResizePending("Deferred", "test", migrationLabels())
 	d.OnPodChange(pod)
 	if len(d.pendingPods) != 0 {
 		t.Fatal("expected 0 pending pods for Deferred below threshold")
 	}
+	if fake.callCount() != 0 {
+		t.Fatal("expected no migration call for Deferred below threshold")
+	}
 
-	// Second: same pod but now Infeasible — should be added immediately
+	// Second: same pod but now Infeasible — should trigger immediately
 	pod.Status.Conditions[0].Reason = "Infeasible"
 	pod.Status.Conditions[0].Message = "Node didn't have enough capacity"
 	d.OnPodChange(pod)
 	if len(d.pendingPods) != 1 {
 		t.Fatalf("expected 1 pending pod after transition to Infeasible, got %d", len(d.pendingPods))
+	}
+	if fake.callCount() != 1 {
+		t.Fatalf("expected 1 migration call for Infeasible, got %d", fake.callCount())
+	}
+}
+
+func TestSetMigrateFunc(t *testing.T) {
+	d := New(nil, config.Config{})
+	fake := &fakeMigrateFunc{}
+	d.SetMigrateFunc(fake.fn)
+
+	if d.migrateFunc == nil {
+		t.Fatal("expected migrateFunc to be set")
 	}
 }
