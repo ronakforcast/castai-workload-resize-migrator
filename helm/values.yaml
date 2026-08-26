@@ -1,0 +1,61 @@
+# Default values for castai-workload-resize-migrator
+
+# -- Controller image
+image:
+  repository: ghcr.io/ronakforcast/castai-workload-resize-migrator
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# -- Number of controller replicas (leader election ensures only one is active)
+replicaCount: 1
+
+# -- Namespace to deploy the controller into
+namespace: castai-workload-resize-migrator
+
+# -- Controller configuration (env vars)
+config:
+  # -- If true, logs what migrations would be created but does not create CRDs
+  dryRun: true
+
+  # -- How long a resize must be pending before triggering migration
+  pendingThreshold: "2m"
+
+  # -- Minimum pending delta / node allocatable CPU ratio (0.15 = 15%)
+  nodeDeltaThreshold: "0.15"
+
+  # -- How long a migration is considered active before allowing retry
+  migrationTimeout: "10m"
+
+  # -- Max retries per failed migration
+  migrationRetryLimit: 3
+
+  # -- Migrations per workload per hour before alerting
+  migrationAlertThreshold: 3
+
+  # -- Name of the CLM-enabled node template (informational)
+  clmNodeTemplate: "clm-live-migration-template"
+
+  # -- Enable leader election (recommended for HA)
+  leaderElection: true
+
+# -- Resource requests and limits for the controller pod
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    memory: "256Mi"
+
+# -- Node selector for the controller pod
+nodeSelector: {}
+
+# -- Tolerations for the controller pod
+tolerations: []
+
+# -- Affinity for the controller pod
+affinity: {}
+
+# -- Security context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532

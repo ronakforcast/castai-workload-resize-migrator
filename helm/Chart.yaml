@@ -1,0 +1,15 @@
+apiVersion: v2
+name: castai-workload-resize-migrator
+description: Detects when CAST AI WOO cannot apply CPU upsize recommendations and triggers Container Live Migration (CLM) to move pods to nodes where the resize can be applied.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - castai
+  - clm
+  - live-migration
+  - workload-autoscaler
+  - resize
+  - kubernetes
+maintainers:
+  - name: Harman CLM Solution Team

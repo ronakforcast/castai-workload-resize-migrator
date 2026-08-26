@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.namespace }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "castai-workload-resize-migrator.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    {{- include "castai-workload-resize-migrator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+    resourceNames: ["{{ .Values.namespace }}"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+    resourceNames: ["{{ .Values.namespace }}"]
+  - apiGroups: ["live.cast.ai"]
+    resources: ["migrations"]
+    verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.namespace }}
+  labels:
+    {{- include "castai-workload-resize-migrator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.namespace }}
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.namespace }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "castai-workload-resize-migrator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "castai-workload-resize-migrator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "castai-workload-resize-migrator.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.namespace }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: DRY_RUN
+              value: {{ .Values.config.dryRun | quote }}
+            - name: PENDING_THRESHOLD
+              value: {{ .Values.config.pendingThreshold | quote }}
+            - name: NODE_DELTA_THRESHOLD
+              value: {{ .Values.config.nodeDeltaThreshold | quote }}
+            - name: MIGRATION_TIMEOUT
+              value: {{ .Values.config.migrationTimeout | quote }}
+            - name: MIGRATION_RETRY_LIMIT
+              value: {{ .Values.config.migrationRetryLimit | quote }}
+            - name: MIGRATION_ALERT_THRESHOLD
+              value: {{ .Values.config.migrationAlertThreshold | quote }}
+            - name: CLM_NODE_TEMPLATE
+              value: {{ .Values.config.clmNodeTemplate | quote }}
+            - name: LEADER_ELECTION_ENABLED
+              value: {{ .Values.config.leaderElection | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
