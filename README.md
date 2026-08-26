@@ -32,35 +32,11 @@ This controller focuses only on **detecting the stuck resize** and **triggering 
 flowchart TD
     WOOP[WOOP recommends CPU upsize] --> Pod[Pod patched via /resize]
     Pod --> Kubelet[Kubelet sets PodResizePending=True]
-    Kubelet --> Controller[Controller detects via informer]
-
-    subgraph CandidateSelection[Candidate Selection]
-        Controller --> Label{Has live.cast.ai/
-migration-enabled=true?}
-        Label -->|No| Skip[Skip]
-        Label -->|Yes| Condition{PodResizePending=True?}
-        Condition -->|No| Skip2[Skip]
-        Condition -->|Yes| Reason{Reason?}
-        Reason -->|Infeasible| Immediate[Add immediately —
-node can never fit it]
-        Reason -->|Deferred| Threshold{Pending >
-PendingThreshold?}
-        Threshold -->|No| Wait[Wait —
-node might free up]
-        Threshold -->|Yes| Add[Add to pending]
-    end
-
-    Immediate --> SafetyScan[Safety Scan every 1 min]
-    Add --> SafetyScan
-    SafetyScan --> Active{Migration
-already active?}
-    Active -->|Yes| RetryCheck{Failed &
-retryable?}
-    RetryCheck -->|Yes| Retry[Retry migration]
-    RetryCheck -->|No| SkipActive[Skip]
-    Active -->|No| Create[Create Migration CRD]
-    Create --> CLM[CLM provisions node + migrates pod]
-    Retry --> CLM
+    Kubelet --> Candidate{Candidate?}
+    Candidate -->|migration-enabled=true<br/>PodResizePending=True<br/>Infeasible or Deferred > threshold| SafetyScan[Safety Scan every 1 min]
+    Candidate -->|No| Skip[Skip pod]
+    SafetyScan --> Create[Create Migration CRD]
+    Create --> CLM[CLM provisions node & migrates pod]
     CLM --> Done[Pod on new node, resize applied]
 ```
 
