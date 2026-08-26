@@ -28,114 +28,40 @@ This controller focuses only on **detecting the stuck resize** and **triggering 
 
 ## Architecture
 
-### High-level flow
-
-```mermaid
-flowchart LR
-    WOOP[WOOP recommends CPU upsize] --> Pod[Pod patched via /resize]
-    Pod --> Kubelet{Kubelet sets PodResizePending=True?}
-    Kubelet -->|Yes| Controller[Controller detects via informer]
-    Controller --> SafetyScan[Safety Scan every 1 min]
-    SafetyScan --> Migrator[Create Migration CRD]
-    Migrator --> CLM[CLM + Autoscaler]
-    CLM --> NewNode[New node provisioned]
-    NewNode --> Migrated[Pod migrated, resize applied]
-    Kubelet -->|No| Skip[Ignore pod]
-```
-
-### Component diagram
-
-```mermaid
-flowchart TB
-    subgraph Controller[Controller Pod]
-        Informers[Informers - Watch Pods]
-        Detector[Detector
-- Filter on migration-enabled label
-- Check PodResizePending condition
-- Infeasible = immediate
-- Deferred = wait for threshold]
-        Migrator[Migrator
-- Create Migration CRD
-- Track status
-- Retry on fail
-- Cleanup completed]
-        DynamicClient[Dynamic Client
-- Migration CRD API]
-        SafetyScan[Safety Scan
-- Runs every 1 min
-- Fallback for event-driven detection]
-
-        Informers --> Detector
-        Detector --> Migrator
-        Migrator --> DynamicClient
-        SafetyScan --> Detector
-        SafetyScan --> Migrator
-    end
-
-    subgraph K8s[Kubernetes API]
-        Pods[Pods with PodResizePending condition]
-        MigrationCRD[Migration CRD
-live.cast.ai/v1]
-    end
-
-    Informers --> Pods
-    DynamicClient --> MigrationCRD
-```
-
-### Detection and migration flow
-
 ```mermaid
 flowchart TD
-    Start[Pod Update via informer] --> Label{Has live.cast.ai/
+    WOOP[WOOP recommends CPU upsize] --> Pod[Pod patched via /resize]
+    Pod --> Kubelet[Kubelet sets PodResizePending=True]
+    Kubelet --> Controller[Controller detects via informer]
+
+    subgraph CandidateSelection[Candidate Selection]
+        Controller --> Label{Has live.cast.ai/
 migration-enabled=true?}
-    Label -->|No| Skip[Skip - ignore pod]
-    Label -->|Yes| Condition{PodResizePending=True?}
-    Condition -->|No| Remove[Remove from pending set]
-    Condition -->|Yes| Reason{Reason?}
-    Reason -->|Infeasible| Immediate[Add to pending immediately
-node can never fit the resize]
-    Reason -->|Deferred| Threshold{Pending for >
+        Label -->|No| Skip[Skip]
+        Label -->|Yes| Condition{PodResizePending=True?}
+        Condition -->|No| Skip2[Skip]
+        Condition -->|Yes| Reason{Reason?}
+        Reason -->|Infeasible| Immediate[Add immediately —
+node can never fit it]
+        Reason -->|Deferred| Threshold{Pending >
 PendingThreshold?}
-    Threshold -->|No| Wait[Wait - node might free up]
-    Threshold -->|Yes| Add[Add to pending set]
+        Threshold -->|No| Wait[Wait —
+node might free up]
+        Threshold -->|Yes| Add[Add to pending]
+    end
+
     Immediate --> SafetyScan[Safety Scan every 1 min]
     Add --> SafetyScan
-    SafetyScan --> Active{Migration already
-active for pod?}
+    SafetyScan --> Active{Migration
+already active?}
     Active -->|Yes| RetryCheck{Failed &
 retryable?}
     RetryCheck -->|Yes| Retry[Retry migration]
-    RetryCheck -->|No| SkipActive[Skip - already active]
-    Active -->|No| Create[Create Migration CRD
-Track as active]
-    Create --> CLM[CLM handles rest]
+    RetryCheck -->|No| SkipActive[Skip]
+    Active -->|No| Create[Create Migration CRD]
+    Create --> CLM[CLM provisions node + migrates pod]
     Retry --> CLM
-```
-
-### Migration lifecycle
-
-```mermaid
-stateDiagram-v2
-    [*] --> Created: Controller creates Migration CRD
-    Created --> WaitingForCapacity: CLM validates
-    WaitingForCapacity --> Running: Capacity pod scheduled
-    Running --> Completed: Migration succeeds
-    Running --> Failed: Restore fails
-    WaitingForCapacity --> Failed: Timeout 10 min
-
-    Completed --> [*]: Controller removes from tracking
-    Failed --> Retry: If retryCount < limit
-    Retry --> Created: New migration created
-    Failed --> [*]: If retryCount >= limit
-
-    note right of Completed
-        Controller polls status
-        every 30 seconds
-    end note
-    note right of Failed
-        Controller retries after
-        MigrationRetryDelay
-    end note
+    CLM --> Done[Pod on new node, resize applied]
 ```
 
 ---
