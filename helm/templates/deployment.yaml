@@ -90,10 +90,14 @@ spec:
               value: {{ .Values.config.pendingThreshold | quote }}
             - name: NODE_DELTA_THRESHOLD
               value: {{ .Values.config.nodeDeltaThreshold | quote }}
+            - name: SAFETY_SCAN_INTERVAL
+              value: {{ .Values.config.safetyScanInterval | quote }}
             - name: MIGRATION_TIMEOUT
               value: {{ .Values.config.migrationTimeout | quote }}
             - name: MIGRATION_RETRY_LIMIT
               value: {{ .Values.config.migrationRetryLimit | quote }}
+            - name: MIGRATION_RETRY_DELAY
+              value: {{ .Values.config.migrationRetryDelay | quote }}
             - name: MIGRATION_ALERT_THRESHOLD
               value: {{ .Values.config.migrationAlertThreshold | quote }}
             - name: CLM_NODE_TEMPLATE

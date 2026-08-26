@@ -23,11 +23,17 @@ config:
   # -- Minimum pending delta / node allocatable CPU ratio (0.15 = 15%)
   nodeDeltaThreshold: "0.15"
 
-  # -- How long a migration is considered active before allowing retry
+  # -- How often the safety scan runs as a fallback (default 1m)
+  safetyScanInterval: "1m"
+
+  # -- How long a migration is considered active before expiring
   migrationTimeout: "10m"
 
   # -- Max retries per failed migration
   migrationRetryLimit: 3
+
+  # -- Minimum delay before retrying a failed migration
+  migrationRetryDelay: "30s"
 
   # -- Migrations per workload per hour before alerting
   migrationAlertThreshold: 3

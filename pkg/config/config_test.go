@@ -9,8 +9,8 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	for _, k := range []string{
 		"DRY_RUN", "PENDING_THRESHOLD", "NODE_DELTA_THRESHOLD",
-		"MIGRATION_TIMEOUT", "MIGRATION_RETRY_LIMIT", "MIGRATION_ALERT_THRESHOLD",
-		"CLM_NODE_TEMPLATE",
+		"SAFETY_SCAN_INTERVAL", "MIGRATION_TIMEOUT", "MIGRATION_RETRY_LIMIT",
+		"MIGRATION_RETRY_DELAY", "MIGRATION_ALERT_THRESHOLD", "CLM_NODE_TEMPLATE",
 	} {
 		os.Unsetenv(k)
 	}
@@ -26,11 +26,17 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.NodeDeltaThreshold != 0.15 {
 		t.Fatalf("expected NodeDeltaThreshold=0.15 by default, got %v", cfg.NodeDeltaThreshold)
 	}
+	if cfg.SafetyScanInterval != 1*time.Minute {
+		t.Fatalf("expected SafetyScanInterval=1m by default, got %v", cfg.SafetyScanInterval)
+	}
 	if cfg.MigrationTimeout != 10*time.Minute {
 		t.Fatalf("expected MigrationTimeout=10m by default, got %v", cfg.MigrationTimeout)
 	}
 	if cfg.MigrationRetryLimit != 3 {
 		t.Fatalf("expected MigrationRetryLimit=3 by default, got %v", cfg.MigrationRetryLimit)
+	}
+	if cfg.MigrationRetryDelay != 30*time.Second {
+		t.Fatalf("expected MigrationRetryDelay=30s by default, got %v", cfg.MigrationRetryDelay)
 	}
 	if cfg.MigrationAlertThreshold != 3 {
 		t.Fatalf("expected MigrationAlertThreshold=3 by default, got %v", cfg.MigrationAlertThreshold)
@@ -42,11 +48,13 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadOverrides(t *testing.T) {
 	setenvs := map[string]string{
-		"DRY_RUN":                     "false",
+		"DRY_RUN":                    "false",
 		"PENDING_THRESHOLD":           "30s",
 		"NODE_DELTA_THRESHOLD":        "0.10",
+		"SAFETY_SCAN_INTERVAL":        "2m",
 		"MIGRATION_TIMEOUT":           "5m",
 		"MIGRATION_RETRY_LIMIT":       "5",
+		"MIGRATION_RETRY_DELAY":       "1m",
 		"MIGRATION_ALERT_THRESHOLD":   "10",
 		"CLM_NODE_TEMPLATE":           "my-clm-template",
 		"LEADER_ELECTION_ENABLED":     "false",
@@ -70,11 +78,17 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.NodeDeltaThreshold != 0.10 {
 		t.Fatalf("expected NodeDeltaThreshold=0.10, got %v", cfg.NodeDeltaThreshold)
 	}
+	if cfg.SafetyScanInterval != 2*time.Minute {
+		t.Fatalf("expected SafetyScanInterval=2m, got %v", cfg.SafetyScanInterval)
+	}
 	if cfg.MigrationTimeout != 5*time.Minute {
 		t.Fatalf("expected MigrationTimeout=5m, got %v", cfg.MigrationTimeout)
 	}
 	if cfg.MigrationRetryLimit != 5 {
 		t.Fatalf("expected MigrationRetryLimit=5, got %v", cfg.MigrationRetryLimit)
+	}
+	if cfg.MigrationRetryDelay != 1*time.Minute {
+		t.Fatalf("expected MigrationRetryDelay=1m, got %v", cfg.MigrationRetryDelay)
 	}
 	if cfg.MigrationAlertThreshold != 10 {
 		t.Fatalf("expected MigrationAlertThreshold=10, got %v", cfg.MigrationAlertThreshold)
