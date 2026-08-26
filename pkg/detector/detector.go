@@ -18,7 +18,8 @@ import (
 )
 
 const (
-	woopEnabledLabel = "workload-autoscaler.cast.ai/enabled"
+	woopEnabledLabel       = "workload-autoscaler.cast.ai/enabled"
+	migrationEnabledLabel = "live.cast.ai/migration-enabled"
 )
 
 type PodPendingInfo struct {
@@ -68,6 +69,14 @@ func (d *Detector) OnPodChange(pod *corev1.Pod) {
 	if pod == nil {
 		return
 	}
+
+	// Only process pods that CLM has labeled as migration-eligible.
+	// This prevents triggering migrations for capacity pods, system pods,
+	// and workloads that CLM cannot migrate.
+	if pod.Labels == nil || pod.Labels[migrationEnabledLabel] != "true" {
+		return
+	}
+
 	key := pod.Namespace + "/" + pod.Name
 
 	desired, allocated, pending := d.extractResizeStatus(pod)

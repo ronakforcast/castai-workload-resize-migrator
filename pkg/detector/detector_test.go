@@ -283,7 +283,11 @@ func TestResolveWorkload(t *testing.T) {
 func TestOnPodChangePendingThreshold(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 50 * time.Millisecond})
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "resize-test", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "resize-test",
+			Namespace: "default",
+			Labels:    map[string]string{"live.cast.ai/migration-enabled": "true"},
+		},
 		Spec: corev1.PodSpec{
 			NodeName: "node-1",
 			Containers: []corev1.Container{
@@ -324,7 +328,11 @@ func TestOnPodChangePendingThreshold(t *testing.T) {
 func TestOnPodChangeNoLongerPending(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "resize-test", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "resize-test",
+			Namespace: "default",
+			Labels:    map[string]string{"live.cast.ai/migration-enabled": "true"},
+		},
 		Spec: corev1.PodSpec{
 			NodeName: "node-1",
 			Containers: []corev1.Container{
@@ -370,7 +378,11 @@ func TestOnPodChangeNoLongerPending(t *testing.T) {
 func TestOnPodDelete(t *testing.T) {
 	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "resize-test", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "resize-test",
+			Namespace: "default",
+			Labels:    map[string]string{"live.cast.ai/migration-enabled": "true"},
+		},
 		Spec: corev1.PodSpec{
 			NodeName: "node-1",
 			Containers: []corev1.Container{
