@@ -30,148 +30,113 @@ This controller focuses only on **detecting the stuck resize** and **triggering 
 
 ### High-level flow
 
-```
-┌──────────┐    ┌──────────┐    ┌──────────────────┐    ┌──────────┐    ┌──────────┐
-│   WOO    │───▶│   Pod    │───▶│  desired >       │───▶│  CLM     │───▶│  Pod on  │
-│ recommends│   │ patched  │    │  allocated?       │    │ Migration│    │ new node │
-│ CPU upsize│   │ via      │    │                    │    │ + node   │    │ resize   │
-│           │   │ /resize  │    │  Controller       │    │ provision│    │ applied  │
-└──────────┘    └──────────┘    └──────────────────┘    └──────────┘    └──────────┘
-                                      │
-                                      │ detects & triggers
-                                      ▼
-                            ┌──────────────────┐
-                            │  Safety Scan     │
-                            │  (every 1 min)   │
-                            └──────────────────┘
+```mermaid
+flowchart LR
+    WOO[WOO recommends CPU upsize] --> Pod[Pod patched via /resize]
+    Pod --> Controller{desired > allocated?}
+    Controller -->|Yes| SafetyScan[Safety Scan every 1 min]
+    SafetyScan --> Migrator[Create Migration CRD]
+    Migrator --> CLM[CLM + Autoscaler]
+    CLM --> NewNode[New node provisioned]
+    NewNode --> Migrated[Pod migrated, resize applied]
+    Controller -->|No| Skip[Ignore pod]
 ```
 
 ### Component diagram
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Controller Pod                           │
-│                                                             │
-│  ┌─────────────┐   ┌──────────────┐   ┌─────────────────┐  │
-│  │  Informers   │──▶│   Detector   │──▶│    Migrator     │  │
-│  │  (Pod/Node)  │   │              │   │                 │  │
-│  │              │   │ • Filter on   │   │ • Create        │  │
-│  │  Watch all   │   │   migration-  │   │   Migration CRD │  │
-│  │  pods/nodes  │   │   enabled    │   │ • Track status  │  │
-│  │              │   │   label      │   │ • Retry on fail │  │
-│  │              │   │ • Compare     │   │ • Cleanup       │  │
-│  │              │   │   desired vs │   │   completed     │  │
-│  │              │   │   allocated  │   │                 │  │
-│  │              │   │ • Aggregate  │   │                 │  │
-│  │              │   │   per node   │   │                 │  │
-│  └─────────────┘   └──────────────┘   └────────┬────────┘  │
-│          │                                     │           │
-│          │                                     ▼           │
-│          │                          ┌─────────────────┐    │
-│          │                          │  Dynamic Client  │    │
-│          │                          │  (Migration CRD) │    │
-│          │                          └─────────────────┘    │
-│          ▼                                                 │
-│  ┌─────────────┐                                           │
-│  │ Safety Scan  │                                           │
-│  │ (fallback)   │                                           │
-│  │ every 1 min  │                                           │
-│  └─────────────┘                                           │
-└─────────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Kubernetes API                           │
-│                                                             │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────────────┐  │
-│  │   Pods    │  │  Nodes   │  │  Migration CRD           │  │
-│  │           │  │          │  │  (live.cast.ai/v1)       │  │
-│  └──────────┘  └──────────┘  └──────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Controller[Controller Pod]
+        Informers[Informers - Watch Pods & Nodes]
+        Detector[Detector
+- Filter on migration-enabled label
+- Compare desired vs allocated
+- Aggregate per node]
+        Migrator[Migrator
+- Create Migration CRD
+- Track status
+- Retry on fail
+- Cleanup completed]
+        DynamicClient[Dynamic Client
+- Migration CRD API]
+        SafetyScan[Safety Scan
+- Runs every 1 min
+- Refreshes node CPU sums
+- Fallback for event-driven detection]
+        
+        Informers --> Detector
+        Detector --> Migrator
+        Migrator --> DynamicClient
+        SafetyScan --> Detector
+        SafetyScan --> Migrator
+    end
+    
+    subgraph K8s[Kubernetes API]
+        Pods[Pods]
+        Nodes[Nodes]
+        MigrationCRD[Migration CRD
+live.cast.ai/v1]
+    end
+    
+    Informers --> Pods
+    Informers --> Nodes
+    DynamicClient --> MigrationCRD
 ```
 
 ### Detection and migration flow
 
-```
-Pod Update (via informer)
-    │
-    ▼
-┌─────────────────────────────┐
-│ Has live.cast.ai/           │─── No ──▶ Skip (ignore pod)
-│ migration-enabled=true?     │
-└─────────────┬───────────────┘
-              │ Yes
-              ▼
-┌─────────────────────────────┐
-│ spec.requests.cpu >         │─── No ──▶ Remove from pending
-│ allocatedResources.cpu?     │
-└─────────────┬───────────────┘
-              │ Yes (pending resize)
-              ▼
-┌─────────────────────────────┐
-│ Pending for >               │─── No ──▶ Wait (not yet)
-│ PENDING_THRESHOLD?          │
-└─────────────┬───────────────┘
-              │ Yes
-              ▼
-┌─────────────────────────────┐
-│ Safety Scan (every 1 min):  │
-│                             │
-│ 1. Refresh node CPU sums    │
-│ 2. Aggregate pending pods   │
-│    per node                 │
-│ 3. Check: node available    │
-│    CPU < pending delta?     │
-└─────────────┬───────────────┘
-              │ Yes (node is full)
-              ▼
-┌─────────────────────────────┐
-│ Migration already active    │─── Yes ──▶ Check if failed
-│ for this pod?               │           & retryable
-└─────────────┬───────────────┘
-              │ No
-              ▼
-┌─────────────────────────────┐
-│ Create Migration CRD        │
-│ Track as active              │
-└─────────────────────────────┘
+```mermaid
+flowchart TD
+    Start[Pod Update via informer] --> Label{Has live.cast.ai/
+migration-enabled=true?}
+    Label -->|No| Skip[Skip - ignore pod]
+    Label -->|Yes| Resize{spec.requests.cpu >
+allocatedResources.cpu?}
+    Resize -->|No| Remove[Remove from pending set]
+    Resize -->|Yes| Threshold{Pending for >
+PendingThreshold?}
+    Threshold -->|No| Wait[Wait - not yet]
+    Threshold -->|Yes| SafetyScan[Safety Scan every 1 min]
+    SafetyScan --> NodeCheck{Node available CPU <
+pending delta?}
+    NodeCheck -->|No| HasRoom[Node has room -
+no migration needed]
+    NodeCheck -->|Yes| Active{Migration already
+active for pod?}
+    Active -->|Yes| RetryCheck{Failed &
+retryable?}
+    RetryCheck -->|Yes| Retry[Retry migration]
+    RetryCheck -->|No| SkipActive[Skip - already active]
+    Active -->|No| Create[Create Migration CRD
+Track as active]
+    Create --> CLM[CLM handles rest]
+    Retry --> CLM
 ```
 
 ### Migration lifecycle
 
-```
-                  ┌──────────────┐
-                  │ Migration    │
-                  │ Created      │
-                  └──────┬───────┘
-                         │
-                         ▼
-              ┌──────────────────┐
-              │ WaitingForCapacity│
-              │ (CLM provisions   │
-              │  node + capacity  │
-              │  pod)             │
-              └────────┬─────────┘
-                       │
-           ┌───────────┼───────────┐
-           ▼           ▼           ▼
-     ┌──────────┐ ┌──────────┐ ┌──────────┐
-     │Completed │ │ Running  │ │ Timeout  │
-     │(success) │ │(migrating)│ │(10 min)  │
-     └────┬─────┘ └────┬─────┘ └────┬─────┘
-          │            │            │
-          ▼            ▼            ▼
-     ┌──────────────────────────────────┐
-     │ Controller checks status every   │
-     │ 30 seconds via cleanup loop     │
-     └──────────────────────────────────┘
-          │
-    ┌─────┼──────┐
-    ▼     ▼      ▼
- Remove Retry   Remove
- from    (if    from
- track   under   track
-         limit)
+```mermaid
+stateDiagram-v2
+    [*] --> Created: Controller creates Migration CRD
+    Created --> WaitingForCapacity: CLM validates
+    WaitingForCapacity --> Running: Capacity pod scheduled
+    Running --> Completed: Migration succeeds
+    Running --> Failed: Restore fails
+    WaitingForCapacity --> Failed: Timeout 10 min
+    
+    Completed --> [*]: Controller removes from tracking
+    Failed --> Retry: If retryCount < limit
+    Retry --> Created: New migration created
+    Failed --> [*]: If retryCount >= limit
+    
+    note right of Completed
+        Controller polls status
+        every 30 seconds
+    end note
+    note right of Failed
+        Controller retries after
+        MigrationRetryDelay
+    end note
 ```
 
 ---
