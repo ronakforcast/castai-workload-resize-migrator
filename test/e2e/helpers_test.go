@@ -256,11 +256,12 @@ func patchPodResize(t *testing.T, ns, podName, containerName, cpu string) {
 	if err != nil {
 		t.Fatalf("get pod after patch: %v", err)
 	}
-	specCPU := pod.Spec.Containers[0].Resources.Requests.Cpu().String()
-	t.Logf("patched pod %s/%s CPU to %s via /resize (spec now: %s)", ns, podName, cpu, specCPU)
+	specCPU := pod.Spec.Containers[0].Resources.Requests.Cpu().MilliValue()
+	expectedCPU := resource.MustParse(cpu)
+	t.Logf("patched pod %s/%s CPU to %s via /resize (spec now: %dm)", ns, podName, cpu, specCPU)
 
-	if specCPU != cpu {
-		t.Fatalf("patch did not apply: expected spec CPU=%s, got %s", cpu, specCPU)
+	if specCPU != expectedCPU.MilliValue() {
+		t.Fatalf("patch did not apply: expected spec CPU=%s (%dm), got %dm", cpu, expectedCPU.MilliValue(), specCPU)
 	}
 }
 
