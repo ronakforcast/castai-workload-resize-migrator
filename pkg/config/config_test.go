@@ -132,3 +132,23 @@ func TestLoadInvalidIntFallsBack(t *testing.T) {
 		t.Fatalf("expected fallback MigrationRetryLimit=3, got %v", cfg.MigrationRetryLimit)
 	}
 }
+
+func TestLoadInvalidSafetyScanIntervalFallsBack(t *testing.T) {
+	os.Setenv("SAFETY_SCAN_INTERVAL", "bad")
+	defer os.Unsetenv("SAFETY_SCAN_INTERVAL")
+
+	cfg := Load()
+	if cfg.SafetyScanInterval != 1*time.Minute {
+		t.Fatalf("expected fallback SafetyScanInterval=1m, got %v", cfg.SafetyScanInterval)
+	}
+}
+
+func TestLoadInvalidMigrationRetryDelayFallsBack(t *testing.T) {
+	os.Setenv("MIGRATION_RETRY_DELAY", "bad")
+	defer os.Unsetenv("MIGRATION_RETRY_DELAY")
+
+	cfg := Load()
+	if cfg.MigrationRetryDelay != 30*time.Second {
+		t.Fatalf("expected fallback MigrationRetryDelay=30s, got %v", cfg.MigrationRetryDelay)
+	}
+}

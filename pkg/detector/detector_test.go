@@ -454,3 +454,148 @@ func TestExtractCPUValuesMultiContainer(t *testing.T) {
 		t.Fatalf("expected allocated=150, got %d", allocated)
 	}
 }
+
+func TestOnPodChangeNilPod(t *testing.T) {
+	d := New(nil, config.Config{})
+	d.OnPodChange(nil)
+	if len(d.pendingPods) != 0 {
+		t.Fatal("expected 0 pending pods for nil pod")
+	}
+}
+
+func TestOnPodChangeNilLabels(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodResizePending, Status: corev1.ConditionTrue, Reason: "Deferred"},
+			},
+		},
+	}
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 0 {
+		t.Fatal("expected 0 pending pods for pod with nil labels")
+	}
+}
+
+func TestOnPodChangeMultipleConditions(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 1 * time.Millisecond})
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "default",
+			Labels:    migrationLabels(),
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+				{Type: corev1.PodResizePending, Status: corev1.ConditionTrue, Reason: "Deferred", Message: "test"},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+	d.OnPodChange(pod)
+	time.Sleep(5 * time.Millisecond)
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 1 {
+		t.Fatalf("expected 1 pending pod with multiple conditions, got %d", len(d.pendingPods))
+	}
+}
+
+func TestListSuspectPodsMixedInfeasibleAndDeferred(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
+
+	// Infeasible — should be returned immediately
+	d.firstSeen["default/pod-a"] = time.Now()
+	d.pendingPods["default/pod-a"] = &PodPendingInfo{
+		Namespace: "default", PodName: "pod-a", NodeName: "node-1",
+		Reason: "Infeasible", PendingSince: time.Now(),
+	}
+
+	// Deferred below threshold — should NOT be returned
+	d.firstSeen["default/pod-b"] = time.Now()
+	d.pendingPods["default/pod-b"] = &PodPendingInfo{
+		Namespace: "default", PodName: "pod-b", NodeName: "node-1",
+		Reason: "Deferred", PendingSince: time.Now(),
+	}
+
+	// Deferred above threshold — should be returned
+	d.firstSeen["default/pod-c"] = time.Now().Add(-1 * time.Hour)
+	d.pendingPods["default/pod-c"] = &PodPendingInfo{
+		Namespace: "default", PodName: "pod-c", NodeName: "node-2",
+		Reason: "Deferred", PendingSince: time.Now().Add(-1 * time.Hour),
+	}
+
+	suspects := d.ListSuspectPods(nil)
+	if len(suspects) != 2 {
+		t.Fatalf("expected 2 suspects (1 Infeasible + 1 Deferred above threshold), got %d", len(suspects))
+	}
+}
+
+func TestExtractCPUValuesMissingAllocatedResources(t *testing.T) {
+	d := New(nil, config.Config{})
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "app",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("500m"),
+						},
+					},
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name: "app",
+					// AllocatedResources is nil, but Resources is set
+					Resources: &corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("100m"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	desired, allocated := d.extractCPUValues(pod)
+	if desired != 500 {
+		t.Fatalf("expected desired=500, got %d", desired)
+	}
+	if allocated != 100 {
+		t.Fatalf("expected allocated=100 (fallback to Resources), got %d", allocated)
+	}
+}
+
+func TestOnPodDeleteNilPod(t *testing.T) {
+	d := New(nil, config.Config{})
+	d.OnPodDelete(nil)
+	if len(d.pendingPods) != 0 {
+		t.Fatal("expected 0 pending pods after nil delete")
+	}
+}
+
+func TestOnPodChangeReasonTransitionsFromDeferredToInfeasible(t *testing.T) {
+	d := New(nil, config.Config{PendingThreshold: 5 * time.Minute})
+
+	// First: Deferred — should NOT be added (below threshold)
+	pod := podWithResizePending("Deferred", "test", migrationLabels())
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 0 {
+		t.Fatal("expected 0 pending pods for Deferred below threshold")
+	}
+
+	// Second: same pod but now Infeasible — should be added immediately
+	pod.Status.Conditions[0].Reason = "Infeasible"
+	pod.Status.Conditions[0].Message = "Node didn't have enough capacity"
+	d.OnPodChange(pod)
+	if len(d.pendingPods) != 1 {
+		t.Fatalf("expected 1 pending pod after transition to Infeasible, got %d", len(d.pendingPods))
+	}
+}

@@ -159,3 +159,65 @@ func TestShouldRetryRespectsDelay(t *testing.T) {
 		t.Fatal("expected shouldRetry=false when retry delay not yet passed")
 	}
 }
+
+func TestTriggerEmptyPodList(t *testing.T) {
+	cfg := config.Config{DryRun: false, MigrationTimeout: 10 * time.Minute}
+	m := newFakeMigrator(t, cfg)
+
+	err := m.Trigger(context.Background(), []*detector.PodPendingInfo{})
+	if err != nil {
+		t.Fatalf("unexpected error on empty list: %v", err)
+	}
+}
+
+func TestTriggerMultiplePods(t *testing.T) {
+	cfg := config.Config{DryRun: false, MigrationTimeout: 10 * time.Minute}
+	m := newFakeMigrator(t, cfg)
+
+	pods := []*detector.PodPendingInfo{
+		{Namespace: "default", PodName: "pod-a", NodeName: "node-1", AllocatedCPU: 100, DesiredCPU: 400},
+		{Namespace: "default", PodName: "pod-b", NodeName: "node-2", AllocatedCPU: 100, DesiredCPU: 400},
+		{Namespace: "default", PodName: "pod-c", NodeName: "node-1", AllocatedCPU: 100, DesiredCPU: 400},
+	}
+
+	err := m.Trigger(context.Background(), pods)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !m.IsActive("default", "pod-a") {
+		t.Fatal("expected pod-a to be active")
+	}
+	if !m.IsActive("default", "pod-b") {
+		t.Fatal("expected pod-b to be active")
+	}
+	if !m.IsActive("default", "pod-c") {
+		t.Fatal("expected pod-c to be active")
+	}
+}
+
+func TestIsActiveNonExistentPod(t *testing.T) {
+	cfg := config.Config{DryRun: false, MigrationTimeout: 10 * time.Minute}
+	m := newFakeMigrator(t, cfg)
+
+	if m.IsActive("default", "nonexistent") {
+		t.Fatal("expected IsActive=false for non-existent pod")
+	}
+}
+
+func TestGenerateMigrationNameTruncation(t *testing.T) {
+	longName := "this-is-a-very-long-pod-name-that-exceeds-fifty-characters-yes-it-does"
+	p := &detector.PodPendingInfo{
+		Namespace: "default",
+		PodName:   longName,
+	}
+	name := generateMigrationName(p)
+	// name = base[:50] + "-woop-" + timestamp = 50 + 6 + 10 = 66 max
+	// k8s names can be up to 253 chars, but we want to keep it reasonable
+	if len(name) > 67 {
+		t.Fatalf("migration name too long: %d chars: %s", len(name), name)
+	}
+	if name[:50] != longName[:50] {
+		t.Fatal("expected first 50 chars of pod name to be used")
+	}
+}
