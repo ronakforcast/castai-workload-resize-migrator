@@ -32,11 +32,10 @@ This controller focuses only on **detecting the stuck resize** and **triggering 
 flowchart TD
     WOOP[WOOP recommends CPU upsize] --> Pod[Pod patched via /resize]
     Pod --> Kubelet[Kubelet sets PodResizePending=True]
-    Kubelet --> Candidate{Is this pod a candidate
-for migration?}
-    Candidate -->|Yes — see below| Create[Create Migration CRD immediately]
+    Kubelet --> Candidate{Pod is a candidate?}
+    Candidate -->|Yes| Create[Create Migration CRD]
     Candidate -->|No| Skip[Skip pod]
-    Create --> CLM[CLM provisions node & migrates pod]
+    Create --> CLM[CLM provisions node and migrates pod]
     CLM --> Done[Pod on new node, resize applied]
 ```
 
@@ -54,43 +53,23 @@ A pod is a candidate for migration when all of these are true:
 
 If any of these conditions is not met, the pod is skipped.
 
-### User journey: multiple Coder pods on a packed node
-
-When WOOP packs multiple Coder pods onto a single node, the node runs efficiently at near-full capacity. If one developer starts a build and WOOP recommends a CPU upsize, the node can't fit it. Here's how the controller handles it:
+### Example: Coder pod on a packed node
 
 ```mermaid
-timeline
-    title Multiple Coder pods on a packed node — one surges
-    section Before (packed node)
-        Node status : 3 Coder pods, each 100m CPU
-        Node status : Node allocatable 1930m
-        Node status : Other workloads using 1530m
-        Node status : Free: 300m — tightly packed by WOOP
-    section Developer
-        T+0s : Pod-1 developer starts build
-        T+30s : CPU spikes on Pod-1
-    section WOOP
-        T+60s : Recommends Pod-1 upsize to 1500m
-        T+61s : Patches Pod-1 via /resize
-    section Kubelet
-        T+61s : Tries to allocate 1500m on node
-        T+61s : Only 300m free, sets PodResizePending=True
-    section Controller
-        T+61s : Detects pending via informer
-        T+61s : Waits (below 2m threshold)
-        T+121s : Kubelet retries, informer fires again
-        T+121s : Threshold passed, creates Migration CRD
-        T+190s : Sees resize applied, cleans up tracking
-    section CLM
-        T+122s : Creates capacity pod (1500m)
-        T+123s : Autoscaler provisions new node
-        T+183s : Node ready, live-migrates Pod-1
-        T+189s : Migration completed on new node
-    section After (resolved)
-        Node status : Pod-1 on new node with 1500m CPU
-        Node status : Pod-2 and Pod-3 still on original node
-        Node status : Original node still packed efficiently
-        T+190s : Developer's build continues with full CPU
+sequenceDiagram
+    participant WOOP
+    participant Kubelet
+    participant Controller
+    participant CLM
+
+    WOOP->>Kubelet: Patch pod CPU 100m → 1500m via /resize
+    Kubelet-->>Controller: PodResizePending=True (only 300m free)
+    Controller->>Controller: Wait PENDING_THRESHOLD (2m)
+    Controller->>CLM: Create Migration CRD
+    CLM->>CLM: Capacity pod (1500m) → autoscaler provisions new node
+    CLM->>Kubelet: Live-migrate pod to new node
+    Kubelet-->>Controller: Resize applied, PodResizePending cleared
+    Controller->>Controller: Clean up tracking
 ```
 
 ---
