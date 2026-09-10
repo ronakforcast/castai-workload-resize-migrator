@@ -78,7 +78,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trivy scan (advisory)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: castai-workload-resize-migrator:ci
           severity: CRITICAL,HIGH
