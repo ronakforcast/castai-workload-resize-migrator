@@ -63,13 +63,12 @@ func TestRestartLosesDedupAndCreatesDuplicateMigration(t *testing.T) {
 	}
 }
 
-// F2 (known risk, characterized): if a tracked Migration CR is deleted
-// (manually or by a future GC), getMigrationState fails forever, cleanup
-// can never classify the entry, and IsActive stays true permanently —
-// the detector skips that pod until the controller restarts. Fix
-// decision pending in the issue (e.g. treat persistent NotFound as
-// removable).
-func TestDeletedMigrationCRLeavesEntryStuckForever(t *testing.T) {
+// F2 (FIXED): if a tracked Migration CR is deleted (manually or by an
+// external GC), cleanup sees NotFound and drops the entry, so the pod
+// becomes eligible again on the next informer event or safety scan.
+// Before the fix, the entry was stuck forever and the pod was invisible
+// to the controller until a restart.
+func TestDeletedMigrationCRReleasesTracking(t *testing.T) {
 	client := newFakeDynamicClient()
 	c := New(config.Config{DryRun: false, MigrationTimeout: 10 * time.Minute}, client)
 	ctx := context.Background()
@@ -87,15 +86,34 @@ func TestDeletedMigrationCRLeavesEntryStuckForever(t *testing.T) {
 		t.Fatalf("delete migration CR: %v", err)
 	}
 
-	// Cleanup ticks many times (as it does every interval)…
-	for i := 0; i < 5; i++ {
-		c.CleanupCompletedMigrations(ctx)
+	c.CleanupCompletedMigrations(ctx)
+
+	if c.IsActive("default", "nginx") {
+		t.Fatal("expected entry to be dropped after the CR was deleted (F2 fix)")
+	}
+}
+
+// F2 guard: only NotFound releases tracking. A transient API error
+// during cleanup (apiserver blip, timeout) must NOT drop the entry —
+// otherwise a momentary failure would re-trigger a duplicate migration.
+func TestTransientCleanupErrorsKeepEntry(t *testing.T) {
+	client := newFakeDynamicClient()
+	c := New(config.Config{DryRun: false, MigrationTimeout: 10 * time.Minute}, client)
+	ctx := context.Background()
+
+	if err := c.Trigger(ctx, []*detector.PodPendingInfo{samplePod()}); err != nil {
+		t.Fatalf("trigger: %v", err)
 	}
 
-	// …but the entry is permanently stuck: the pod stays invisible to
-	// the controller until a restart.
+	// Every Get during cleanup fails with a non-NotFound error.
+	client.PrependReactor("get", "migrations", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("apiserver down")
+	})
+
+	c.CleanupCompletedMigrations(ctx)
+
 	if !c.IsActive("default", "nginx") {
-		t.Fatal("expected entry to remain stuck after CR deletion (known F2 behavior)")
+		t.Fatal("transient cleanup errors must keep the entry tracked")
 	}
 }
 
@@ -237,11 +255,12 @@ func TestCRDMissingErrorsThenRecoversWithoutCrash(t *testing.T) {
 	}
 }
 
-// F8 (known risk, characterized): MigrationTimeout=0 explicitly
-// disables the wall-clock timeout, so a migration stuck in a
-// non-terminal state is tracked forever (memory entry + permanent
-// IsActive block on the pod). The config value is operator-supplied;
-// this documents the consequence of the zero value.
+// F8 (migrator-level semantics, documented): a MigrationTimeout of zero
+// disables the wall-clock timeout for entries stuck in non-terminal
+// states. Config.Load() now normalizes non-positive MIGRATION_TIMEOUT
+// values to the 10m default (see TestLoadZeroMigrationTimeoutFallsBack),
+// so operators can no longer enable this via env; the semantic remains
+// for programmatic Config construction and is locked in here.
 func TestZeroMigrationTimeoutDisablesExpiry(t *testing.T) {
 	client := newFakeDynamicClient()
 	seedMigration(t, client, "default", "mig-stuck", "Running")

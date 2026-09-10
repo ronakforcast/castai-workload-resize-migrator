@@ -34,7 +34,7 @@ func Load() Config {
 		PendingThreshold:         getDuration("PENDING_THRESHOLD", 2*time.Minute),
 		SafetyScanInterval:       getDuration("SAFETY_SCAN_INTERVAL", 2*time.Minute),
 		SafetyScanStartupDelay:   getDuration("SAFETY_SCAN_STARTUP_DELAY", 10*time.Second),
-		MigrationTimeout:         getDuration("MIGRATION_TIMEOUT", 10*time.Minute),
+		MigrationTimeout:         getPositiveDuration("MIGRATION_TIMEOUT", 10*time.Minute),
 		MigrationCleanupInterval: getDuration("MIGRATION_CLEANUP_INTERVAL", 30*time.Second),
 		MigrationRetryLimit:      getInt("MIGRATION_RETRY_LIMIT", 3),
 		MigrationRetryDelay:      getDuration("MIGRATION_RETRY_DELAY", 30*time.Second),
@@ -83,6 +83,37 @@ func getDuration(key string, fallback time.Duration) time.Duration {
 			"value", v,
 			"default", fallback.String(),
 			"error", err.Error(),
+		)
+		return fallback
+	}
+	return d
+}
+
+// getPositiveDuration is like getDuration but additionally falls back to
+// the default when the parsed value is zero or negative. Used for
+// durations where a non-positive value would silently disable a safety
+// mechanism (e.g. MIGRATION_TIMEOUT: zero would track stuck migrations
+// forever). Issue #1, item F8.
+func getPositiveDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		slog.Warn("invalid duration value for env var; falling back to default",
+			"key", key,
+			"value", v,
+			"default", fallback.String(),
+			"error", err.Error(),
+		)
+		return fallback
+	}
+	if d <= 0 {
+		slog.Warn("non-positive duration value for env var; falling back to default",
+			"key", key,
+			"value", v,
+			"default", fallback.String(),
 		)
 		return fallback
 	}

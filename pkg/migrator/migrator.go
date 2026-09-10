@@ -12,6 +12,7 @@ import (
 	"castai-workload-resize-migrator/pkg/config"
 	"castai-workload-resize-migrator/pkg/detector"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -269,6 +270,24 @@ func (c *Client) cleanupExpiredMigrations(ctx context.Context) {
 	for _, it := range items {
 		state, err := c.getMigrationState(ctx, it.namespace, it.migration)
 		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// The Migration CR is gone (deleted manually or by an
+				// external GC). Tracking it further is pointless — and
+				// would permanently hide the pod from the detector
+				// (IsActive stays true) — so drop the entry. The pod
+				// becomes eligible again on the next informer event or
+				// safety scan. Issue #1, item F2.
+				slog.Info("migration CR not found; dropping tracking so the pod can be re-triggered",
+					"pod", it.key,
+					"migration", it.migration,
+				)
+				c.mu.Lock()
+				if cur, ok := c.activeMigrations[it.key]; ok && cur == it.entry {
+					delete(c.activeMigrations, it.key)
+				}
+				c.mu.Unlock()
+				continue
+			}
 			slog.Debug("failed to get migration state during cleanup", "pod", it.key, "error", err)
 			continue
 		}

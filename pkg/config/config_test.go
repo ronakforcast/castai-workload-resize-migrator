@@ -210,6 +210,29 @@ func TestLoadInvalidMigrationRetryDelayFallsBack(t *testing.T) {
 	}
 }
 
+// F8 fix (issue #1): a zero MIGRATION_TIMEOUT would silently disable the
+// stuck-migration timeout and track entries forever. Non-positive values
+// must fall back to the default.
+func TestLoadZeroMigrationTimeoutFallsBack(t *testing.T) {
+	os.Setenv("MIGRATION_TIMEOUT", "0")
+	defer os.Unsetenv("MIGRATION_TIMEOUT")
+
+	cfg := Load()
+	if cfg.MigrationTimeout != 10*time.Minute {
+		t.Fatalf("expected fallback MigrationTimeout=10m for zero value, got %v", cfg.MigrationTimeout)
+	}
+}
+
+func TestLoadNegativeMigrationTimeoutFallsBack(t *testing.T) {
+	os.Setenv("MIGRATION_TIMEOUT", "-5m")
+	defer os.Unsetenv("MIGRATION_TIMEOUT")
+
+	cfg := Load()
+	if cfg.MigrationTimeout != 10*time.Minute {
+		t.Fatalf("expected fallback MigrationTimeout=10m for negative value, got %v", cfg.MigrationTimeout)
+	}
+}
+
 func TestLoadInvalidDurationLogsWarning(t *testing.T) {
 	buf, restore := captureSlog(t)
 	defer restore()
