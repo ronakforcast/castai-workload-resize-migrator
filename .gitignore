@@ -1,5 +1,5 @@
 # Binaries
-castai-workload-resize-migrator
+/castai-workload-resize-migrator
 *.exe
 *.dll
 *.so

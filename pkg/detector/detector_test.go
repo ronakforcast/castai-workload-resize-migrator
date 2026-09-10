@@ -11,6 +11,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+	clientgotesting "k8s.io/client-go/testing"
 )
 
 func podWithResizePending(reason, message string, labels map[string]string) *corev1.Pod {
@@ -590,5 +592,160 @@ func TestSetMigrateFunc(t *testing.T) {
 
 	if d.migrateFunc == nil {
 		t.Fatal("expected migrateFunc to be set")
+	}
+}
+
+// podWithResizePendingScoped builds a PodResizePending pod with a custom
+// name/namespace and node so cluster-scan tests can stage multiple pods.
+func podWithResizePendingScoped(name, namespace, node string, reason, message string, labels map[string]string) *corev1.Pod {
+	p := podWithResizePending(reason, message, labels)
+	p.Name = name
+	p.Namespace = namespace
+	p.Spec.NodeName = node
+	// Field selector "status.phase=Running" is applied by the safety scan,
+	// so the pods we stage for cluster-scan tests must be Running.
+	p.Status.Phase = corev1.PodRunning
+	return p
+}
+
+func TestListSuspectPodsScansClusterWhenMemoryEmpty(t *testing.T) {
+	// In-memory map is empty; a PodResizePending pod exists only in the
+	// fake clientset. The safety scan must still find it.
+	clientset := fake.NewSimpleClientset(
+		podWithResizePendingScoped("scan-pod-a", "default", "node-1", "Infeasible", "no capacity", migrationLabels()),
+	)
+	d := New(clientset, config.Config{PendingThreshold: 1 * time.Minute})
+
+	if len(d.pendingPods) != 0 {
+		t.Fatal("precondition: pendingPods should be empty")
+	}
+
+	suspects := d.ListSuspectPods(context.Background())
+	if len(suspects) != 1 {
+		t.Fatalf("expected 1 suspect from cluster scan, got %d", len(suspects))
+	}
+	if suspects[0].PodName != "scan-pod-a" || suspects[0].Namespace != "default" {
+		t.Fatalf("unexpected suspect: %+v", suspects[0])
+	}
+	if suspects[0].Reason != "Infeasible" {
+		t.Fatalf("expected reason=Infeasible, got %q", suspects[0].Reason)
+	}
+	if suspects[0].DesiredCPU != 1500 || suspects[0].AllocatedCPU != 100 {
+		t.Fatalf("expected desired=1500, allocated=100, got %+v", suspects[0])
+	}
+}
+
+func TestListSuspectPodsDeferredBelowThresholdSkipped(t *testing.T) {
+	clientset := fake.NewSimpleClientset(
+		podWithResizePendingScoped("scan-pod-b", "default", "node-1", "Deferred", "waiting", migrationLabels()),
+	)
+	d := New(clientset, config.Config{PendingThreshold: 10 * time.Minute})
+
+	suspects := d.ListSuspectPods(context.Background())
+	if len(suspects) != 0 {
+		t.Fatalf("expected Deferred pod below threshold to be skipped, got %d suspects", len(suspects))
+	}
+}
+
+func TestListSuspectPodsDeferredAboveThresholdIncluded(t *testing.T) {
+	clientset := fake.NewSimpleClientset(
+		podWithResizePendingScoped("scan-pod-c", "default", "node-1", "Deferred", "waiting", migrationLabels()),
+	)
+	d := New(clientset, config.Config{PendingThreshold: 10 * time.Millisecond})
+
+	// Seed firstSeen so PendingSince predates the threshold — mirrors a
+	// pod that has been observed by OnPodChange for a while.
+	d.firstSeen["default/scan-pod-c"] = time.Now().Add(-1 * time.Hour)
+
+	suspects := d.ListSuspectPods(context.Background())
+	if len(suspects) != 1 {
+		t.Fatalf("expected Deferred pod above threshold to be included, got %d suspects", len(suspects))
+	}
+	if suspects[0].PodName != "scan-pod-c" {
+		t.Fatalf("unexpected suspect: %+v", suspects[0])
+	}
+}
+
+func TestListSuspectPodsUsesFirstSeenForPendingSince(t *testing.T) {
+	clientset := fake.NewSimpleClientset(
+		podWithResizePendingScoped("scan-pod-d", "default", "node-1", "Deferred", "waiting", migrationLabels()),
+	)
+	d := New(clientset, config.Config{PendingThreshold: 10 * time.Millisecond})
+
+	// firstSeen predates now — PendingSince should be carried over
+	// from the in-memory map rather than set to time.Now().
+	stamp := time.Now().Add(-1 * time.Hour)
+	d.firstSeen["default/scan-pod-d"] = stamp
+
+	suspects := d.ListSuspectPods(context.Background())
+	if len(suspects) != 1 {
+		t.Fatalf("expected 1 suspect, got %d", len(suspects))
+	}
+	if !suspects[0].PendingSince.Equal(stamp) {
+		t.Fatalf("expected PendingSince to use firstSeen stamp %v, got %v", stamp, suspects[0].PendingSince)
+	}
+}
+
+func TestListSuspectPodsIgnoresUnlabeledPods(t *testing.T) {
+	clientset := fake.NewSimpleClientset(
+		podWithResizePendingScoped("scan-pod-e", "default", "node-1", "Infeasible", "no capacity", map[string]string{"app": "nginx"}),
+		podWithResizePendingScoped("scan-pod-f", "default", "node-2", "Infeasible", "no capacity", migrationLabels()),
+	)
+	d := New(clientset, config.Config{PendingThreshold: 1 * time.Minute})
+
+	suspects := d.ListSuspectPods(context.Background())
+	if len(suspects) != 1 {
+		t.Fatalf("expected only the labeled pod to be returned, got %d suspects", len(suspects))
+	}
+	if suspects[0].PodName != "scan-pod-f" {
+		t.Fatalf("expected scan-pod-f, got %q", suspects[0].PodName)
+	}
+}
+
+func TestListSuspectPodsIgnoresNonPendingPods(t *testing.T) {
+	notPending := podWithResizePendingScoped("scan-pod-g", "default", "node-1", "Deferred", "waiting", migrationLabels())
+	notPending.Status.Conditions = []corev1.PodCondition{} // no PodResizePending
+	clientset := fake.NewSimpleClientset(notPending)
+	d := New(clientset, config.Config{PendingThreshold: 1 * time.Minute})
+
+	suspects := d.ListSuspectPods(context.Background())
+	if len(suspects) != 0 {
+		t.Fatalf("expected non-pending pod to be skipped, got %d suspects", len(suspects))
+	}
+}
+
+func TestSafetyScanUsesSelectors(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	d := New(clientset, config.Config{PendingThreshold: 1 * time.Minute})
+
+	if got := d.ListSuspectPods(context.Background()); len(got) != 0 {
+		t.Fatalf("expected empty result from empty clientset, got %d suspects", len(got))
+	}
+
+	var listAction clientgotesting.ListAction
+	for _, a := range clientset.Actions() {
+		la, ok := a.(clientgotesting.ListAction)
+		if !ok {
+			continue
+		}
+		if la.GetResource().Resource != "pods" {
+			continue
+		}
+		listAction = la
+	}
+	if listAction == nil {
+		t.Fatal("expected a pod list action recorded by the fake clientset")
+	}
+
+	restrictions := listAction.GetListRestrictions()
+
+	const wantLabel = "live.cast.ai/migration-enabled=true"
+	const wantField = "status.phase=Running"
+
+	if got := restrictions.Labels.String(); got != wantLabel {
+		t.Errorf("label selector: got %q, want %q", got, wantLabel)
+	}
+	if got := restrictions.Fields.String(); got != wantField {
+		t.Errorf("field selector: got %q, want %q", got, wantField)
 	}
 }

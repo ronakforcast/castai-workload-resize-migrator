@@ -23,8 +23,14 @@ config:
   # -- How often the fallback safety scan runs (NOT the primary trigger — migrations are event-driven)
   safetyScanInterval: "2m"
 
+  # -- Delay after startup before the first fallback safety scan runs
+  safetyScanStartupDelay: "10s"
+
   # -- How long a migration is considered active before expiring
   migrationTimeout: "10m"
+
+  # -- How often completed/failed migrations are cleaned from in-memory tracking
+  migrationCleanupInterval: "30s"
 
   # -- Max retries per failed migration
   migrationRetryLimit: 3
@@ -32,14 +38,14 @@ config:
   # -- Minimum delay before retrying a failed migration
   migrationRetryDelay: "30s"
 
-  # -- Migrations per workload per hour before alerting
-  migrationAlertThreshold: 3
-
   # -- Name of the CLM-enabled node template (informational)
   clmNodeTemplate: "clm-live-migration-template"
 
   # -- Enable leader election (recommended for HA)
   leaderElection: true
+
+  # -- Name of the leader election lease (must match the leases resourceName in ClusterRole)
+  leaderElectionLeaseName: "castai-workload-resize-migrator"
 
 # -- Resource requests and limits for the controller pod
 resources:

@@ -11,6 +11,7 @@ import (
 	"castai-workload-resize-migrator/pkg/config"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -27,8 +28,8 @@ type PodPendingInfo struct {
 	WorkloadName string
 	WorkloadKind string
 	NodeName     string
-	AllocatedCPU int64 // milli-cores
-	DesiredCPU   int64 // milli-cores
+	AllocatedCPU int64  // milli-cores
+	DesiredCPU   int64  // milli-cores
 	Reason       string // Deferred or Infeasible
 	Message      string // kubelet's explanation
 	PendingSince time.Time
@@ -38,10 +39,22 @@ type PodPendingInfo struct {
 // The detector calls this from OnPodChange — no safety scan delay.
 type MigrateFunc func(ctx context.Context, p *PodPendingInfo) error
 
+// MigrationStateChecker reports whether the migrator already has an
+// active migration for a given pod. The detector consults this in
+// OnPodChange so that pods whose migrations are already in-flight on
+// another replica (or about to retry) are not double-triggered.
+//
+// It is nil-safe: when no checker is wired up the detector behaves as
+// it always has (no de-duplication against the migrator).
+type MigrationStateChecker interface {
+	IsActive(namespace, podName string) bool
+}
+
 type Detector struct {
 	clientset   kubernetes.Interface
 	cfg         config.Config
 	migrateFunc MigrateFunc
+	activeCheck MigrationStateChecker
 
 	mu          sync.RWMutex
 	pendingPods map[string]*PodPendingInfo
@@ -60,6 +73,14 @@ func New(clientset kubernetes.Interface, cfg config.Config) *Detector {
 // SetMigrateFunc sets the callback used to create migrations immediately.
 func (d *Detector) SetMigrateFunc(fn MigrateFunc) {
 	d.migrateFunc = fn
+}
+
+// SetMigrationStateChecker installs a callback that reports whether the
+// migrator already has an active migration for a pod. When set, the
+// detector will skip pods for which the checker returns true, avoiding
+// duplicate triggers. Calling with nil disables the check.
+func (d *Detector) SetMigrationStateChecker(c MigrationStateChecker) {
+	d.activeCheck = c
 }
 
 func (d *Detector) Run(ctx context.Context) {
@@ -89,6 +110,16 @@ func (d *Detector) OnPodChange(pod *corev1.Pod) {
 		return
 	}
 
+	// If the migrator already has an active migration for this pod
+	// (e.g. observed on another replica via leader-election failover),
+	// skip it. This is best-effort: the migrator is also idempotent
+	// against duplicate triggers, but checking here avoids emitting
+	// spurious log lines and re-populating the in-memory pending map.
+	if d.activeCheck != nil && d.activeCheck.IsActive(pod.Namespace, pod.Name) {
+		slog.Debug("pod already has an active migration; skipping", "key", key)
+		return
+	}
+
 	d.mu.Lock()
 	if _, ok := d.firstSeen[key]; !ok {
 		d.firstSeen[key] = time.Now()
@@ -98,7 +129,13 @@ func (d *Detector) OnPodChange(pod *corev1.Pod) {
 
 	// Determine if this pod qualifies for immediate migration.
 	eligible := false
-	if reason == reasonInfeasible {
+	if !d.isActionableReason(reason) {
+		// Unknown / unrecognized reasons (including missing/empty) are
+		// not actionable — only Infeasible and Deferred trigger the
+		// migration path. Tracking the firstSeen timestamp is harmless
+		// because the next informer update may carry an actionable
+		// reason; until then we do nothing.
+	} else if reason == reasonInfeasible {
 		// Infeasible: node can never fit the resize. Trigger immediately.
 		eligible = true
 	} else {
@@ -165,18 +202,120 @@ func (d *Detector) OnNodeDelete(node *corev1.Node) {
 	// No-op — we don't track nodes anymore.
 }
 
-// ListSuspectPods returns all pending pods. This is used by the fallback
-// safety scan to catch any pods that were missed during informer events
-// (e.g., controller restart, informer cache gap).
+// ListSuspectPods scans the cluster for pods that qualify for migration
+// but were missed by the event-driven OnPodChange path (e.g., controller
+// restart, brief informer cache gap). It is a fallback to the in-memory
+// pendingPods map.
+//
+// The scan lists pods via the provided kubernetes.Interface and applies
+// the same candidate filter as OnPodChange:
+//   - label live.cast.ai/migration-enabled=true
+//   - PodResizePending=True
+//   - reason Infeasible (always eligible) or Deferred beyond
+//     PendingThreshold.
+//
+// PendingSince is taken from the in-memory firstSeen map when available,
+// otherwise now is used (so Deferred pods that were never seen via the
+// informer will not pass the threshold on a single scan).
 func (d *Detector) ListSuspectPods(ctx context.Context) []*PodPendingInfo {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	var suspects []*PodPendingInfo
-	for _, info := range d.pendingPods {
-		suspects = append(suspects, info)
+	// Fallback when no clientset is wired up (e.g., unit tests that
+	// exercise only the in-memory map).
+	if d.clientset == nil {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		suspects := make([]*PodPendingInfo, 0, len(d.pendingPods))
+		for _, info := range d.pendingPods {
+			suspects = append(suspects, info)
+		}
+		return suspects
 	}
+
+	// Use label and field selectors to limit the safety scan to pods
+	// the controller actually cares about. This avoids paginating every
+	// pod in the cluster and reduces API server load.
+	list, err := d.clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		LabelSelector: migrationEnabledLabel + "=true",
+		FieldSelector: "status.phase=Running",
+	})
+	if err != nil {
+		slog.Error("safety scan: failed to list pods", "error", err)
+		// On API error, fall back to whatever is in memory so the
+		// caller's retry loop still surfaces something useful.
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		suspects := make([]*PodPendingInfo, 0, len(d.pendingPods))
+		for _, info := range d.pendingPods {
+			suspects = append(suspects, info)
+		}
+		return suspects
+	}
+
+	now := time.Now()
+	suspects := make([]*PodPendingInfo, 0, len(list.Items))
+
+	for i := range list.Items {
+		pod := &list.Items[i]
+
+		if pod.Labels == nil || pod.Labels[migrationEnabledLabel] != "true" {
+			continue
+		}
+
+		reason, message, pending := d.extractResizeStatus(pod)
+		if !pending {
+			continue
+		}
+
+		key := pod.Namespace + "/" + pod.Name
+
+		d.mu.RLock()
+		firstSeen, seen := d.firstSeen[key]
+		d.mu.RUnlock()
+
+		pendingSince := firstSeen
+		if !seen {
+			pendingSince = now
+		}
+
+		eligible := false
+		switch reason {
+		case reasonInfeasible:
+			eligible = true
+		case reasonDeferred:
+			if now.Sub(pendingSince) >= d.cfg.PendingThreshold {
+				eligible = true
+			}
+		}
+
+		if !eligible {
+			continue
+		}
+
+		desired, allocated := d.extractCPUValues(pod)
+		workloadName, workloadKind := d.resolveWorkload(pod)
+
+		suspects = append(suspects, &PodPendingInfo{
+			Namespace:    pod.Namespace,
+			PodName:      pod.Name,
+			WorkloadName: workloadName,
+			WorkloadKind: workloadKind,
+			NodeName:     pod.Spec.NodeName,
+			AllocatedCPU: allocated,
+			DesiredCPU:   desired,
+			Reason:       reason,
+			Message:      message,
+			PendingSince: pendingSince,
+		})
+	}
+
 	return suspects
+}
+
+// isActionableReason reports whether the given PodResizePending reason
+// should drive a migration. Only Infeasible and Deferred are actionable;
+// unknown or missing reasons are ignored. Extracted as a method so the
+// OnPodChange and ListSuspectPods paths share the same gating policy.
+func (d *Detector) isActionableReason(reason string) bool {
+	return reason == reasonInfeasible || reason == reasonDeferred
 }
 
 // extractResizeStatus checks the pod's PodResizePending condition.

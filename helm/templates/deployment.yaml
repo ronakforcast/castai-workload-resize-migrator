@@ -14,7 +14,7 @@ metadata:
     {{- include "castai-workload-resize-migrator.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["pods", "nodes"]
+    resources: ["pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/status"]
@@ -29,7 +29,7 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "create", "update"]
-    resourceNames: ["{{ .Values.namespace }}"]
+    resourceNames: ["{{ .Values.config.leaderElectionLeaseName }}"]
   - apiGroups: ["live.cast.ai"]
     resources: ["migrations"]
     verbs: ["get", "list", "watch", "create"]
@@ -90,18 +90,22 @@ spec:
               value: {{ .Values.config.pendingThreshold | quote }}
             - name: SAFETY_SCAN_INTERVAL
               value: {{ .Values.config.safetyScanInterval | quote }}
+            - name: SAFETY_SCAN_STARTUP_DELAY
+              value: {{ .Values.config.safetyScanStartupDelay | quote }}
             - name: MIGRATION_TIMEOUT
               value: {{ .Values.config.migrationTimeout | quote }}
+            - name: MIGRATION_CLEANUP_INTERVAL
+              value: {{ .Values.config.migrationCleanupInterval | quote }}
             - name: MIGRATION_RETRY_LIMIT
               value: {{ .Values.config.migrationRetryLimit | quote }}
             - name: MIGRATION_RETRY_DELAY
               value: {{ .Values.config.migrationRetryDelay | quote }}
-            - name: MIGRATION_ALERT_THRESHOLD
-              value: {{ .Values.config.migrationAlertThreshold | quote }}
             - name: CLM_NODE_TEMPLATE
               value: {{ .Values.config.clmNodeTemplate | quote }}
             - name: LEADER_ELECTION_ENABLED
               value: {{ .Values.config.leaderElection | quote }}
+            - name: LEADER_ELECTION_LEASE_NAME
+              value: {{ .Values.config.leaderElectionLeaseName | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

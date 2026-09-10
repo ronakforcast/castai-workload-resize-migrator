@@ -15,7 +15,7 @@ metadata:
   name: castai-workload-resize-migrator
 rules:
   - apiGroups: [""]
-    resources: ["pods", "nodes"]
+    resources: ["pods"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods/status"]
@@ -81,16 +81,18 @@ spec:
               value: "true"
             - name: PENDING_THRESHOLD
               value: "2m"
-            - name: NODE_DELTA_THRESHOLD
-              value: "0.15"
             - name: MIGRATION_TIMEOUT
               value: "10m"
+            - name: SAFETY_SCAN_STARTUP_DELAY
+              value: "10s"
+            - name: MIGRATION_CLEANUP_INTERVAL
+              value: "30s"
             - name: MIGRATION_RETRY_LIMIT
-              value: "3"
-            - name: MIGRATION_ALERT_THRESHOLD
               value: "3"
             - name: CLM_NODE_TEMPLATE
               value: "clm-live-migration-template"
+            - name: LEADER_ELECTION_LEASE_NAME
+              value: "castai-workload-resize-migrator"
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
