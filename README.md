@@ -2,6 +2,8 @@
 
 Detects when CAST AI Workload Autoscaler (WOOP) cannot apply a CPU upsize recommendation to a pod because the node is full, and triggers CAST AI Container Live Migration (CLM) by creating a `Migration` CRD. CAST AI CLM then provisions a suitable node and live-migrates the pod so the upsize can be applied.
 
+<!-- test-pr-marker: added to verify the PR workflow; safe to remove -->
+
 ---
 
 ## Table of Contents
