@@ -388,7 +388,7 @@ var lifecycleMigrationGVR = schema.GroupVersionResource{
 func newFakeDynamicClientForLifecycle() dynamic.Interface {
 	scheme := runtime.NewScheme()
 	listKinds := map[schema.GroupVersionResource]string{
-		lifecycleMigrationGVR: "MigrationList",
+		lifecycleMigrationGVR:                         "MigrationList",
 		{Group: "", Version: "v1", Resource: "nodes"}: "NodeList",
 	}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
@@ -402,7 +402,7 @@ func newFakeDynamicClientForLifecycle() dynamic.Interface {
 			"metadata": map[string]interface{}{
 				"name": "dest-node-1",
 				"labels": map[string]interface{}{
-					"live.cast.ai/migration-enabled":    "true",
+					"live.cast.ai/migration-enabled":   "true",
 					"scheduling.cast.ai/node-template": "clm-live-migration-template",
 					"topology.kubernetes.io/zone":      "zone-a",
 				},

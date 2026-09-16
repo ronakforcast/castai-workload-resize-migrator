@@ -59,7 +59,7 @@ func seedDestinationNodes(client *dynamicfake.FakeDynamicClient, templates ...st
 				"metadata": map[string]interface{}{
 					"name": fmt.Sprintf("dest-node-%d", i+1),
 					"labels": map[string]interface{}{
-						"live.cast.ai/migration-enabled":    "true",
+						"live.cast.ai/migration-enabled":   "true",
 						"scheduling.cast.ai/node-template": tmpl,
 						"topology.kubernetes.io/zone":      "zone-a",
 					},
