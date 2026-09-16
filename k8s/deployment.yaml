@@ -77,7 +77,7 @@ spec:
       serviceAccountName: castai-workload-resize-migrator
       containers:
         - name: controller
-          image: ttl.sh/castai-workload-resize-migrator:latest
+          image: ghcr.io/ronakforcast/castai-workload-resize-migrator:0.1.5
           imagePullPolicy: Always
           env:
             - name: DRY_RUN
