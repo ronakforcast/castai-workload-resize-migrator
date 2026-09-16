@@ -76,15 +76,17 @@ sequenceDiagram
 
 ## How It Works
 
-1. **Watches all pods** via Kubernetes informers (event-driven).
+1. **Watches pods** via Kubernetes informers (event-driven).
 2. **Filters** on `live.cast.ai/migration-enabled=true` label (auto-added by CLM to eligible pods).
-3. **Checks `PodResizePending` condition** — set by kubelet when an in-place resize cannot be applied.
-4. **Distinguishes by reason**:
+3. **Scopes to source node templates** — when `SOURCE_NODE_TEMPLATES` is set, only pods running on nodes created from the listed CAST AI node templates are considered (node label `scheduling.cast.ai/node-template`). Empty means all pods.
+4. **Checks `PodResizePending` condition** — set by kubelet when an in-place resize cannot be applied.
+5. **Distinguishes by reason**:
    - `Infeasible` — requested CPU exceeds node's total capacity. The resize can **never** succeed on this node. Migration is triggered **immediately** via informer event — no threshold wait.
    - `Deferred` — node is temporarily full but could fit the resize later. Waits for `PENDING_THRESHOLD` (default 2m). Kubelet periodically retries Deferred resizes, updating the pod status and re-triggering the informer. When the threshold passes, migration is triggered **immediately** via informer event.
-5. **Safety scan** runs every 2 minutes (configurable) as a **fallback only** — catches any pods missed during controller restart or informer cache gaps. This is NOT the primary trigger.
-6. **Tracks** migration status and retries on failure (up to `MIGRATION_RETRY_LIMIT`).
-7. **Cleans up** completed or permanently failed migrations from tracking.
+6. **Selects a destination node** — a live-migration-enabled node from the **same CAST AI node template** as the pod's current node (matching CPU generation), in the **same availability zone**, excluding the source node and any destination that previously failed. If no such node exists, the migration **fails safely**: nothing is created, an error is logged, and the pod is left untouched.
+7. **Safety scan** runs every 2 minutes (configurable) as a **fallback only** — catches any pods missed during controller restart or informer cache gaps. This is NOT the primary trigger.
+8. **Tracks** migration status and retries on failure (up to `MIGRATION_RETRY_LIMIT`, walking to a different destination node on each retry).
+9. **Cleans up** completed or permanently failed migrations from tracking.
 
 ---
 
@@ -107,7 +109,68 @@ The customer must create a CAST AI node template with Container Live Migration e
 - **Single subnet / single AZ**: CLM requires source and destination nodes in the same Availability Zone
 - **Custom label**: `live.cast.ai/install=true`
 
-### 3. Node configuration
+> ⚠️ **Critical — instance family generation matters.** Live migration requires source and destination nodes to have identical host CPU capabilities. Use the *same CPU generation set* for all families in the template (e.g., c5+m5+r5). Mixing generations causes `CpuCapabilityMismatch` migration failures. Use the compatible-instance helper in the CAST AI console when configuring the template.
+
+### 3. At least TWO CLM nodes (source + destination)
+
+The controller migrates pods **between** CLM-enabled nodes — it never migrates onto the node the pod is already running on. If your cluster has only one live-migration-enabled node, migrations fail safely (nothing happens, an error is logged) until a second node from the same template and AZ exists.
+
+Verify before enabling migrations:
+
+```bash
+kubectl get nodes -l live.cast.ai/migration-enabled=true
+# You need at least 2 nodes, in the same AZ, from the same node template
+```
+
+If you only have one, create a lightweight second node with a helper deployment (set the template name in both places):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clm-node2-spawner
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clm-node2
+  template:
+    metadata:
+      labels:
+        app: clm-node2
+    spec:
+      nodeSelector:
+        scheduling.cast.ai/node-template: <your-clm-template-name>
+      tolerations:
+      - key: scheduling.cast.ai/node-template
+        operator: Equal
+        value: <your-clm-template-name>
+        effect: NoSchedule
+      containers:
+      - name: placeholder
+        image: nginx:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+```
+
+### 4. WOOP apply mode
+
+The controller complements CAST AI Workload Autoscaler (WOOP), which applies CPU recommendations via in-place resize. When a resize gets stuck:
+
+- **Deferred apply mode** (recommended): WOOP leaves the stuck resize pending — the controller is the sole resolver. This is the intended configuration.
+- **Immediate apply mode**: WOOP may fall back to evicting the pod to complete the resize via restart, racing the controller's migration. Prefer deferred mode for the policy covering in-scope workloads.
+
+Check which mode is active:
+
+```bash
+kubectl logs -n castai-agent -l app.kubernetes.io/name=workload-autoscaler --tail=100 | grep immediate_mode
+# "immediate_mode":false  → deferred (recommended)
+```
+
+### 5. Node configuration
 
 The linked node configuration must use:
 
@@ -115,7 +178,7 @@ The linked node configuration must use:
 - **Container runtime**: `containerd`
 - **Single subnet** (same AZ as source nodes)
 
-### 4. Workload requirements
+### 6. Workload requirements
 
 Source pods must:
 
@@ -127,13 +190,42 @@ Source pods must:
 
 ## Installation
 
-### Using Helm
+### Using Helm (recommended onboarding flow)
+
+**Step 1 — install in dry-run mode first** (safe canary: the controller logs what it would migrate, but creates nothing):
 
 ```bash
 helm install castai-workload-resize-migrator ./helm \
   --namespace castai-workload-resize-migrator \
-  --create-namespace \
-  --set config.dryRun=false
+  --set config.dryRun=true \
+  --set config.clmNodeTemplate=<your-clm-template-name> \
+  --set config.sourceNodeTemplates=<your-clm-template-name>
+```
+
+> Note: if the namespace already exists, create it first (`kubectl create namespace castai-workload-resize-migrator`) — the chart also creates it via its own template.
+
+**Step 2 — verify detection** while dry-run is active (generate load on a full node, or watch for stuck-resize pods):
+
+```bash
+kubectl logs -n castai-workload-resize-migrator deployment/castai-workload-resize-migrator -f | grep 'DRY-RUN'
+```
+
+**Step 3 — enable real migrations** once detection looks right:
+
+```bash
+helm upgrade castai-workload-resize-migrator ./helm \
+  --namespace castai-workload-resize-migrator \
+  --set config.dryRun=false \
+  --set config.clmNodeTemplate=<your-clm-template-name> \
+  --set config.sourceNodeTemplates=<your-clm-template-name>
+```
+
+### Container image
+
+The default image is `ghcr.io/ronakforcast/castai-workload-resize-migrator`. If it is not pullable from your cluster, build and push it to a registry the cluster can reach, then override:
+
+```bash
+--set image.repository=<your-registry>/castai-workload-resize-migrator --set image.tag=<tag>
 ```
 
 ### Using kubectl (without Helm)
@@ -161,6 +253,7 @@ kubectl apply -f k8s/deployment.yaml
 | `config.migrationRetryDelay` | `30s` | Minimum delay before retrying a failed migration |
 | `config.migrationAlertThreshold` | `3` | Migrations per workload per hour before alerting |
 | `config.clmNodeTemplate` | `clm-live-migration-template` | Name of the CLM-enabled node template |
+| `config.sourceNodeTemplates` | `""` (all pods) | Comma-separated CAST AI node template names. When set, only pods running on nodes created from these templates are considered for migration. Empty means all pods. |
 | `config.leaderElection` | `true` | Enable leader election for HA |
 | `resources.requests.cpu` | `50m` | CPU request |
 | `resources.requests.memory` | `64Mi` | Memory request |
@@ -221,6 +314,10 @@ helm install castai-workload-resize-migrator ./helm \
 |---|---|
 | Migration fails with `PodSchedulingFailed` | Ensure source and destination nodes are in the **same AZ** (single subnet in node config) |
 | Migration fails with `SubnetMismatch` | Add `topology.cast.ai/subnet-id` label to EKS-managed nodes, or use only CLM-provisioned nodes |
+| Migration fails with `CpuCapabilityMismatch` ("source cpu capabilities do not match destination") | Source and destination nodes are on different host CPU generations or vendors. Restrict the node template's instance families to a **single CPU generation set** (e.g., all c5/m5/r5, or all n2/n2d) using the compatible-instance helper in the CAST AI console |
+| Migration fails with `DestinationNodeNotEligible` ("scheduled node not compatible") | The named destination lacked capacity and CLM's capacity-pod flow re-selected an incompatible node. Restrict template families (see above) and ensure a second compatible node with free capacity exists |
+| Migration fails with "same-node migration is not supported" | Controller version predates destination selection. Upgrade to ≥ 0.1.4 |
+| Nothing happens — no migration, no logs | Check (a) ≥ 2 CLM-enabled nodes from the same template and AZ: `kubectl get nodes -l live.cast.ai/migration-enabled=true`, (b) `config.sourceNodeTemplates` matches the value of the `scheduling.cast.ai/node-template` label on your nodes, (c) `config.clmNodeTemplate` is set correctly |
 | Capacity pod stuck Pending | Ensure the CLM node template allows large enough instances for the desired CPU |
 | Controller detects no suspect pods | Ensure pods have `resizePolicy` and `PodResizePending` condition (requires in-place resize support) |
 | Controller detects no suspect pods | Ensure pods have `live.cast.ai/migration-enabled=true` label (CLM adds this automatically to eligible pods) |

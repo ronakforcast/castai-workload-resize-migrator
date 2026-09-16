@@ -28,8 +28,11 @@ rules:
     resourceNames: ["{{ .Values.namespace }}"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
     resourceNames: ["{{ .Values.config.leaderElectionLeaseName }}"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["live.cast.ai"]
     resources: ["migrations"]
     verbs: ["get", "list", "watch", "create"]
@@ -102,6 +105,10 @@ spec:
               value: {{ .Values.config.migrationRetryDelay | quote }}
             - name: CLM_NODE_TEMPLATE
               value: {{ .Values.config.clmNodeTemplate | quote }}
+            {{- if .Values.config.sourceNodeTemplates }}
+            - name: SOURCE_NODE_TEMPLATES
+              value: {{ .Values.config.sourceNodeTemplates | quote }}
+            {{- end }}
             - name: LEADER_ELECTION_ENABLED
               value: {{ .Values.config.leaderElection | quote }}
             - name: LEADER_ELECTION_LEASE_NAME

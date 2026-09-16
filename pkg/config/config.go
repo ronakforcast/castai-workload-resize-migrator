@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,10 +22,14 @@ type Config struct {
 	MigrationRetryLimit      int
 	MigrationRetryDelay      time.Duration
 	CLMNodeTemplate          string
-	LeaderElection           bool
-	LeaseName                string
-	PodNamespace             string
-	PodName                  string
+	// SourceNodeTemplates scopes the controller to pods running on nodes
+	// provisioned from these CAST AI node templates (node label
+	// scheduling.cast.ai/node-template). Empty means all pods.
+	SourceNodeTemplates []string
+	LeaderElection      bool
+	LeaseName           string
+	PodNamespace        string
+	PodName             string
 }
 
 // Load reads configuration from environment variables.
@@ -39,11 +44,31 @@ func Load() Config {
 		MigrationRetryLimit:      getInt("MIGRATION_RETRY_LIMIT", 3),
 		MigrationRetryDelay:      getDuration("MIGRATION_RETRY_DELAY", 30*time.Second),
 		CLMNodeTemplate:          getString("CLM_NODE_TEMPLATE", "clm-live-migration-template"),
+		SourceNodeTemplates:      getStringSlice("SOURCE_NODE_TEMPLATES", ""),
 		LeaderElection:           getBool("LEADER_ELECTION_ENABLED", true),
 		LeaseName:                getString("LEADER_ELECTION_LEASE_NAME", "castai-workload-resize-migrator"),
 		PodNamespace:             getString("POD_NAMESPACE", ""),
 		PodName:                  getString("POD_NAME", ""),
 	}
+}
+
+// getStringSlice reads a comma-separated env var into a trimmed,
+// non-empty slice. Empty value yields nil (feature disabled).
+func getStringSlice(key, fallback string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		v = fallback
+	}
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getString(key, fallback string) string {

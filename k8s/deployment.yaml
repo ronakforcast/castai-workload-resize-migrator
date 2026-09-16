@@ -29,8 +29,11 @@ rules:
     resourceNames: ["castai-workload-resize-migrator"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
     resourceNames: ["castai-workload-resize-migrator"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["live.cast.ai"]
     resources: ["migrations"]
     verbs: ["get", "list", "watch", "create"]
@@ -91,6 +94,8 @@ spec:
               value: "3"
             - name: CLM_NODE_TEMPLATE
               value: "clm-live-migration-template"
+            - name: SOURCE_NODE_TEMPLATES
+              value: ""
             - name: LEADER_ELECTION_LEASE_NAME
               value: "castai-workload-resize-migrator"
             - name: POD_NAMESPACE

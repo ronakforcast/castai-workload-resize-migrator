@@ -15,6 +15,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -44,8 +45,29 @@ func newFakeDynamicClient() dynamic.Interface {
 	scheme := runtime.NewScheme()
 	listKinds := map[schema.GroupVersionResource]string{
 		migrationGVR: "MigrationList",
+		{Group: "", Version: "v1", Resource: "nodes"}: "NodeList",
 	}
-	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
+	// Seed live-migration-enabled destination nodes for the template names
+	// used across the e2e tests.
+	for i, tmpl := range []string{"clm-live-migration-template", "castai-spot-xlarge"} {
+		node := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Node",
+				"metadata": map[string]interface{}{
+					"name": fmt.Sprintf("dest-node-%d", i+1),
+					"labels": map[string]interface{}{
+						"live.cast.ai/migration-enabled":    "true",
+						"scheduling.cast.ai/node-template": tmpl,
+						"topology.kubernetes.io/zone":      "zone-a",
+					},
+				},
+			},
+		}
+		_, _ = client.Resource(schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}).Create(context.Background(), node, metav1.CreateOptions{})
+	}
+	return client
 }
 
 func makePendingPod(name, ns, node, reason string) *corev1.Pod {
@@ -155,7 +177,7 @@ func TestBusiness_TC01_GoldenPathDeferred(t *testing.T) {
 
 // TestBusiness_TC02_DestinationEqualsSourceNode verifies that the created
 // Migration CRD carries spec.destination equal to the pod's current node.
-func TestBusiness_TC02_DestinationEqualsSourceNode(t *testing.T) {
+func TestBusiness_TC02_DestinationIsOtherLiveEnabledNode(t *testing.T) {
 	cs := fake.NewSimpleClientset(makePendingPod("app-3", "default", "node-src", "Infeasible"))
 	dyn := newFakeDynamicClient()
 	cfg := config.Config{DryRun: false, MigrationTimeout: 10 * time.Minute}
@@ -178,8 +200,14 @@ func TestBusiness_TC02_DestinationEqualsSourceNode(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("spec.destination not found: err=%v found=%v", err, found)
 	}
-	if dest != "node-src" {
-		t.Fatalf("spec.destination=%q, want node-src", dest)
+	// Destination must never be the source node: the live migration
+	// controller rejects same-node migrations. With an empty
+	// CLMNodeTemplate the only live-enabled node is dest-node-1.
+	if dest == "node-src" {
+		t.Fatalf("spec.destination must not equal the source node, got %q", dest)
+	}
+	if dest != "dest-node-1" {
+		t.Fatalf("spec.destination=%q, want dest-node-1", dest)
 	}
 }
 

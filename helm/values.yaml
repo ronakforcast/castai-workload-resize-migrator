@@ -41,6 +41,11 @@ config:
   # -- Name of the CLM-enabled node template (informational)
   clmNodeTemplate: "clm-live-migration-template"
 
+  # -- Comma-separated list of CAST AI node template names. When set, only
+  # pods running on nodes provisioned from these templates are considered
+  # for migration. Empty means all pods (no scoping).
+  sourceNodeTemplates: ""
+
   # -- Enable leader election (recommended for HA)
   leaderElection: true
 

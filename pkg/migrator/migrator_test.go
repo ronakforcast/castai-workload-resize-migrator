@@ -3,6 +3,7 @@ package migrator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -37,8 +38,36 @@ func newFakeDynamicClient() *dynamicfake.FakeDynamicClient {
 	scheme := runtime.NewScheme()
 	listKinds := map[schema.GroupVersionResource]string{
 		migrationGVR: "MigrationList",
+		nodeGVR:      "NodeList",
 	}
-	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
+	// Seed destination nodes for every template name used across the tests:
+	// the migrator only creates migrations when a live-migration-enabled node
+	// from the configured CLM node template is available as destination.
+	seedDestinationNodes(client, "clm-live-migration-template", "castai-spot-xlarge")
+	return client
+}
+
+// seedDestinationNodes creates fake nodes labelled as live-migration-enabled
+// members of the given CAST AI node templates.
+func seedDestinationNodes(client *dynamicfake.FakeDynamicClient, templates ...string) {
+	for i, tmpl := range templates {
+		node := &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Node",
+				"metadata": map[string]interface{}{
+					"name": fmt.Sprintf("dest-node-%d", i+1),
+					"labels": map[string]interface{}{
+						"live.cast.ai/migration-enabled":    "true",
+						"scheduling.cast.ai/node-template": tmpl,
+						"topology.kubernetes.io/zone":      "zone-a",
+					},
+				},
+			},
+		}
+		_, _ = client.Resource(nodeGVR).Create(context.Background(), node, metav1.CreateOptions{})
+	}
 }
 
 // seedMigration puts a Migration CRD with the given state into the fake
@@ -514,9 +543,12 @@ func TestAPICallDoesNotHoldMutex(t *testing.T) {
 	scheme := runtime.NewScheme()
 	listKinds := map[schema.GroupVersionResource]string{
 		migrationGVR: "MigrationList",
+		nodeGVR:      "NodeList",
 	}
+	inner := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
+	seedDestinationNodes(inner, "clm-live-migration-template")
 	gate := &gatingClient{
-		FakeDynamicClient: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds),
+		FakeDynamicClient: inner,
 		release:           release,
 	}
 	cfg := config.Config{

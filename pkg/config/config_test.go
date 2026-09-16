@@ -301,3 +301,23 @@ func TestLoadInvalidIntLogsWarning(t *testing.T) {
 		t.Fatalf("expected log to contain invalid value abc, got: %s", out)
 	}
 }
+
+// TestLoadSourceNodeTemplates verifies parsing of the comma-separated
+// SOURCE_NODE_TEMPLATES env var: trimming whitespace, dropping empty
+// entries, and returning nil when unset (scoping disabled).
+func TestLoadSourceNodeTemplates(t *testing.T) {
+	t.Setenv("SOURCE_NODE_TEMPLATES", " clm-template , ,other-template ")
+	cfg := Load()
+	if len(cfg.SourceNodeTemplates) != 2 {
+		t.Fatalf("expected 2 templates, got %d (%v)", len(cfg.SourceNodeTemplates), cfg.SourceNodeTemplates)
+	}
+	if cfg.SourceNodeTemplates[0] != "clm-template" || cfg.SourceNodeTemplates[1] != "other-template" {
+		t.Fatalf("unexpected templates: %v", cfg.SourceNodeTemplates)
+	}
+
+	t.Setenv("SOURCE_NODE_TEMPLATES", "")
+	cfg = Load()
+	if cfg.SourceNodeTemplates != nil {
+		t.Fatalf("expected nil SourceNodeTemplates when unset, got %v", cfg.SourceNodeTemplates)
+	}
+}

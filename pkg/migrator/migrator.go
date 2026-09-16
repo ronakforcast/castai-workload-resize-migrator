@@ -19,11 +19,19 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
-var migrationGVR = schema.GroupVersionResource{
-	Group:    "live.cast.ai",
-	Version:  "v1",
-	Resource: "migrations",
-}
+var (
+	migrationGVR = schema.GroupVersionResource{
+		Group:    "live.cast.ai",
+		Version:  "v1",
+		Resource: "migrations",
+	}
+
+	nodeGVR = schema.GroupVersionResource{
+		Group:    "",
+		Version:  "v1",
+		Resource: "nodes",
+	}
+)
 
 // migrationEntry tracks a single migration's lifecycle.
 type migrationEntry struct {
@@ -34,14 +42,30 @@ type migrationEntry struct {
 	retryCount int
 }
 
+// failedDestinations maps pod key -> set of destination node names whose
+// migration failed (e.g. CpuCapabilityMismatch). Retries exclude these so a
+// hard-incompatible destination is never picked twice.
+func (c *Client) failedDestinationsFor(key string) map[string]struct{} {
+	if c.failedDestinations == nil {
+		c.failedDestinations = make(map[string]map[string]struct{})
+	}
+	set, ok := c.failedDestinations[key]
+	if !ok {
+		set = make(map[string]struct{})
+		c.failedDestinations[key] = set
+	}
+	return set
+}
+
 // Client creates and tracks CAST AI CLM Migration CRDs.
 type Client struct {
 	cfg    config.Config
 	client dynamic.Interface
 
-	mu               sync.Mutex
-	activeMigrations map[string]*migrationEntry // pod key -> entry
-	nameCounter      atomic.Uint64              // monotonic counter for unique migration names
+	mu                 sync.Mutex
+	activeMigrations   map[string]*migrationEntry     // pod key -> entry
+	failedDestinations map[string]map[string]struct{} // pod key -> destinations to exclude on retry
+	nameCounter        atomic.Uint64                  // monotonic counter for unique migration names
 }
 
 // New creates a new migrator client.
@@ -86,6 +110,16 @@ func (c *Client) triggerOne(ctx context.Context, p *detector.PodPendingInfo) err
 	var snapshot migrationEntry
 	if active {
 		snapshot = *entry
+	} else {
+		// Reserve the key up front so a concurrent trigger for the same pod
+		// (informer worker racing the safety scan) cannot also create a
+		// Migration CRD. createMigration fills in the reserved entry.
+		entry = &migrationEntry{
+			name:      p.PodName,
+			namespace: p.Namespace,
+			createdAt: time.Now(),
+		}
+		c.activeMigrations[key] = entry
 	}
 	c.mu.Unlock()
 
@@ -93,7 +127,26 @@ func (c *Client) triggerOne(ctx context.Context, p *detector.PodPendingInfo) err
 		return c.handleExistingMigration(ctx, p, key, entry, snapshot)
 	}
 
-	return c.createMigration(ctx, p, 0)
+	if err := c.createMigration(ctx, p, 0); err != nil {
+		// Release the reservation if it is still ours and no migration was
+		// recorded, so a later attempt can retry cleanly.
+		c.mu.Lock()
+		if cur, ok := c.activeMigrations[key]; ok && cur == entry && cur.migration == "" {
+			delete(c.activeMigrations, key)
+		}
+		c.mu.Unlock()
+		return err
+	}
+	if c.cfg.DryRun {
+		// Dry-run created no Migration CRD: release the reservation so the
+		// pod is not considered actively migrating.
+		c.mu.Lock()
+		if cur, ok := c.activeMigrations[key]; ok && cur == entry {
+			delete(c.activeMigrations, key)
+		}
+		c.mu.Unlock()
+	}
+	return nil
 }
 
 // handleExistingMigration decides whether to retry a tracked pod's migration.
@@ -116,6 +169,15 @@ func (c *Client) handleExistingMigration(ctx context.Context, p *detector.PodPen
 	if state != "Failed" {
 		slog.Debug("migration not in Failed state, skipping", "pod", key, "migration", snapshot.migration, "state", state)
 		return nil
+	}
+
+	// Remember the destination that failed so retries pick a different
+	// node. A CpuCapabilityMismatch (or any other destination-specific
+	// failure) would recur on the same destination.
+	if failedDest, err := c.getMigrationDestination(ctx, snapshot.namespace, snapshot.migration); err == nil && failedDest != "" {
+		c.mu.Lock()
+		c.failedDestinationsFor(key)[failedDest] = struct{}{}
+		c.mu.Unlock()
 	}
 
 	// Atomically claim the retry slot. Re-verify the entry is still the same
@@ -149,6 +211,82 @@ func (c *Client) retryPolicyAllows(entry *migrationEntry) bool {
 	return true
 }
 
+// selectDestinationNode picks a destination node for a migration of a pod
+// running on sourceNode. Candidates are live-migration-enabled nodes that
+// were provisioned from the same CAST AI node template as configured via
+// CLMNodeTemplate (nodes carry the template name in the
+// scheduling.cast.ai/node-template label), excluding the source node.
+// Nodes in the same zone as the source node are preferred. If no candidate
+// exists, an error is returned so the caller can fail safely without
+// creating a migration.
+func (c *Client) selectDestinationNode(ctx context.Context, sourceNode string, exclude map[string]struct{}) (string, error) {
+	list, err := c.client.Resource(nodeGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", fmt.Errorf("list nodes: %w", err)
+	}
+
+	sourceZone := ""
+	for _, n := range list.Items {
+		if n.GetName() == sourceNode {
+			sourceZone, _, _ = unstructured.NestedString(n.Object, "metadata", "labels", "topology.kubernetes.io/zone")
+			break
+		}
+	}
+
+	bestSameZone := ""
+	bestAny := ""
+	for _, n := range list.Items {
+		name := n.GetName()
+		if name == sourceNode {
+			continue
+		}
+		if _, failed := exclude[name]; failed {
+			continue
+		}
+		labels, _, _ := unstructured.NestedStringMap(n.Object, "metadata", "labels")
+		if labels == nil || labels["live.cast.ai/migration-enabled"] != "true" {
+			continue
+		}
+		// Only nodes from the same CAST AI node template are valid
+		// destinations (instance-family compatibility for live migration).
+		if tmpl := labels["scheduling.cast.ai/node-template"]; c.cfg.CLMNodeTemplate != "" && tmpl != c.cfg.CLMNodeTemplate {
+			continue
+		}
+		if bestAny == "" {
+			bestAny = name
+		}
+		if zone := labels["topology.kubernetes.io/zone"]; sourceZone != "" && zone == sourceZone {
+			bestSameZone = name
+			break
+		}
+	}
+
+	if bestSameZone != "" {
+		return bestSameZone, nil
+	}
+	if bestAny != "" {
+		return bestAny, nil
+	}
+	return "", fmt.Errorf("no live-migration-enabled node from node template %q available as destination (source node %q and %d previously failed destination(s) excluded); failing safely without creating migration",
+		c.cfg.CLMNodeTemplate, sourceNode, len(exclude))
+}
+
+// getMigrationDestination fetches the spec.destination of a Migration CRD.
+func (c *Client) getMigrationDestination(ctx context.Context, namespace, name string) (string, error) {
+	obj, err := c.client.Resource(migrationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	dest, found, err := unstructured.NestedString(obj.Object, "spec", "destination")
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", nil
+	}
+	return dest, nil
+}
+
 // createMigration creates a new Migration CRD for the pod and records the
 // resulting entry in activeMigrations. The supplied retryCount is preserved
 // when an existing entry is updated; otherwise it is used for new entries.
@@ -168,6 +306,21 @@ func (c *Client) createMigration(ctx context.Context, p *detector.PodPendingInfo
 		labels["castai-workload-resize-migrator/clm-node-template"] = c.cfg.CLMNodeTemplate
 	}
 
+	// Destination must be a live-migration-enabled node from the same CLM
+	// node template as the pod's current node, and must differ from it: the
+	// live migration controller rejects same-node migrations. If no such
+	// node exists, the migration fails safely and nothing is created.
+	c.mu.Lock()
+	exclude := make(map[string]struct{}, len(c.failedDestinations[key]))
+	for n := range c.failedDestinations[key] {
+		exclude[n] = struct{}{}
+	}
+	c.mu.Unlock()
+	destination, err := c.selectDestinationNode(ctx, p.NodeName, exclude)
+	if err != nil {
+		return fmt.Errorf("select destination node for %s: %w", key, err)
+	}
+
 	migration := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "live.cast.ai/v1",
@@ -179,17 +332,17 @@ func (c *Client) createMigration(ctx context.Context, p *detector.PodPendingInfo
 			},
 			"spec": map[string]interface{}{
 				"podName":     p.PodName,
-				"destination": p.NodeName,
+				"destination": destination,
 			},
 		},
 	}
 
-	_, err := c.client.Resource(migrationGVR).Namespace(p.Namespace).Create(ctx, migration, metav1.CreateOptions{})
+	_, err = c.client.Resource(migrationGVR).Namespace(p.Namespace).Create(ctx, migration, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("create migration %s/%s: %w", p.Namespace, migrationName, err)
 	}
 
-	slog.Info("migration created", "pod", key, "migration", migrationName, "node", p.NodeName)
+	slog.Info("migration created", "pod", key, "migration", migrationName, "node", p.NodeName, "destination", destination)
 
 	c.mu.Lock()
 	if cur, ok := c.activeMigrations[key]; ok {
@@ -284,6 +437,7 @@ func (c *Client) cleanupExpiredMigrations(ctx context.Context) {
 				c.mu.Lock()
 				if cur, ok := c.activeMigrations[it.key]; ok && cur == it.entry {
 					delete(c.activeMigrations, it.key)
+					delete(c.failedDestinations, it.key)
 				}
 				c.mu.Unlock()
 				continue
@@ -329,6 +483,7 @@ func (c *Client) cleanupExpiredMigrations(ctx context.Context) {
 		c.mu.Lock()
 		if cur, ok := c.activeMigrations[it.key]; ok && cur == it.entry {
 			delete(c.activeMigrations, it.key)
+			delete(c.failedDestinations, it.key)
 		}
 		c.mu.Unlock()
 	}

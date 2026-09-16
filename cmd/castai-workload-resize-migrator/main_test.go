@@ -13,6 +13,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -388,8 +389,28 @@ func newFakeDynamicClientForLifecycle() dynamic.Interface {
 	scheme := runtime.NewScheme()
 	listKinds := map[schema.GroupVersionResource]string{
 		lifecycleMigrationGVR: "MigrationList",
+		{Group: "", Version: "v1", Resource: "nodes"}: "NodeList",
 	}
-	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
+	// Seed a live-migration-enabled destination node so the migrator can
+	// create migrations (cfg.CLMNodeTemplate is empty in this test, so the
+	// template filter is skipped and only the live-enabled label matters).
+	node := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "Node",
+			"metadata": map[string]interface{}{
+				"name": "dest-node-1",
+				"labels": map[string]interface{}{
+					"live.cast.ai/migration-enabled":    "true",
+					"scheduling.cast.ai/node-template": "clm-live-migration-template",
+					"topology.kubernetes.io/zone":      "zone-a",
+				},
+			},
+		},
+	}
+	_, _ = client.Resource(schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}).Create(context.Background(), node, metav1.CreateOptions{})
+	return client
 }
 
 // TestRunControllerEventPathCreatesMigration is the regression test for the

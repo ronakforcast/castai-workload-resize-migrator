@@ -17,6 +17,7 @@ import (
 
 const (
 	migrationEnabledLabel = "live.cast.ai/migration-enabled"
+	nodeTemplateLabel     = "scheduling.cast.ai/node-template"
 	podResizePendingType  = "PodResizePending"
 	reasonDeferred        = "Deferred"
 	reasonInfeasible      = "Infeasible"
@@ -56,17 +57,19 @@ type Detector struct {
 	migrateFunc MigrateFunc
 	activeCheck MigrationStateChecker
 
-	mu          sync.RWMutex
-	pendingPods map[string]*PodPendingInfo
-	firstSeen   map[string]time.Time
+	mu            sync.RWMutex
+	pendingPods   map[string]*PodPendingInfo
+	firstSeen     map[string]time.Time
+	nodeTemplates map[string]string // node name -> node-template label value
 }
 
 func New(clientset kubernetes.Interface, cfg config.Config) *Detector {
 	return &Detector{
-		clientset:   clientset,
-		cfg:         cfg,
-		pendingPods: make(map[string]*PodPendingInfo),
-		firstSeen:   make(map[string]time.Time),
+		clientset:     clientset,
+		cfg:           cfg,
+		pendingPods:   make(map[string]*PodPendingInfo),
+		firstSeen:     make(map[string]time.Time),
+		nodeTemplates: make(map[string]string),
 	}
 }
 
@@ -94,6 +97,11 @@ func (d *Detector) OnPodChange(pod *corev1.Pod) {
 
 	// Only process pods that CLM has labeled as migration-eligible.
 	if pod.Labels == nil || pod.Labels[migrationEnabledLabel] != "true" {
+		return
+	}
+
+	// Scope to configured source node templates, if any.
+	if !d.podInScope(pod) {
 		return
 	}
 
@@ -193,13 +201,59 @@ func (d *Detector) OnPodDelete(pod *corev1.Pod) {
 	d.mu.Unlock()
 }
 
+// OnNodeChange records the node's CAST AI node-template label so that
+// pod scoping (SOURCE_NODE_TEMPLATES) can resolve a pod's node template
+// without an API round-trip. Fed from the node informer in main.go.
 func (d *Detector) OnNodeChange(node *corev1.Node) {
-	// Node tracking is no longer needed — kubelet's PodResizePending
-	// condition is authoritative for whether the node can fit the resize.
+	if node == nil {
+		return
+	}
+	tmpl := ""
+	if node.Labels != nil {
+		tmpl = node.Labels[nodeTemplateLabel]
+	}
+	d.mu.Lock()
+	d.nodeTemplates[node.Name] = tmpl
+	d.mu.Unlock()
 }
 
+// OnNodeDelete drops the node's template record.
 func (d *Detector) OnNodeDelete(node *corev1.Node) {
-	// No-op — we don't track nodes anymore.
+	if node == nil {
+		return
+	}
+	d.mu.Lock()
+	delete(d.nodeTemplates, node.Name)
+	d.mu.Unlock()
+}
+
+// podInScope reports whether the pod runs on a node from one of the
+// configured source node templates. When SourceNodeTemplates is empty,
+// all pods are in scope (backward compatible). Pods on unknown nodes
+// (node not yet in the informer cache) are treated as out of scope;
+// the node informer resync (30s) and kubelet's periodic status updates
+// will re-trigger OnPodChange once the node is known.
+func (d *Detector) podInScope(pod *corev1.Pod) bool {
+	if len(d.cfg.SourceNodeTemplates) == 0 {
+		return true
+	}
+	if pod.Spec.NodeName == "" {
+		return false
+	}
+	d.mu.RLock()
+	tmpl, known := d.nodeTemplates[pod.Spec.NodeName]
+	d.mu.RUnlock()
+	if !known {
+		slog.Debug("pod on unknown node; skipping until node informer syncs", "pod", pod.Namespace+"/"+pod.Name, "node", pod.Spec.NodeName)
+		return false
+	}
+	for _, want := range d.cfg.SourceNodeTemplates {
+		if tmpl == want {
+			return true
+		}
+	}
+	slog.Debug("pod on node from non-scoped node template; skipping", "pod", pod.Namespace+"/"+pod.Name, "node", pod.Spec.NodeName, "nodeTemplate", tmpl)
+	return false
 }
 
 // ListSuspectPods scans the cluster for pods that qualify for migration
@@ -257,6 +311,11 @@ func (d *Detector) ListSuspectPods(ctx context.Context) []*PodPendingInfo {
 		pod := &list.Items[i]
 
 		if pod.Labels == nil || pod.Labels[migrationEnabledLabel] != "true" {
+			continue
+		}
+
+		// Scope to configured source node templates, if any.
+		if !d.podInScope(pod) {
 			continue
 		}
 

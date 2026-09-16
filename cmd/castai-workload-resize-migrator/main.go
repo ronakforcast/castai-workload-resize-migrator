@@ -162,11 +162,21 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 
 	factory := informers.NewSharedInformerFactory(clientset, 30*time.Second)
 	podInformer := factory.Core().V1().Pods().Informer()
+	nodeInformer := factory.Core().V1().Nodes().Informer()
 
 	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj interface{}) { det.OnPodChange(podFrom(obj)) },
 		UpdateFunc: func(_, newObj interface{}) { det.OnPodChange(podFrom(newObj)) },
 		DeleteFunc: func(obj interface{}) { det.OnPodDelete(podFrom(obj)) },
+	})
+
+	// Node informer feeds the detector's node-template map, used to scope
+	// the controller to pods on specific CAST AI node templates
+	// (SOURCE_NODE_TEMPLATES).
+	nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { det.OnNodeChange(nodeFrom(obj)) },
+		UpdateFunc: func(_, newObj interface{}) { det.OnNodeChange(nodeFrom(newObj)) },
+		DeleteFunc: func(obj interface{}) { det.OnNodeDelete(nodeFrom(obj)) },
 	})
 
 	factory.Start(ctx.Done())
@@ -259,6 +269,19 @@ func podFrom(obj interface{}) *corev1.Pod {
 	}
 	if pod, ok := obj.(*corev1.Pod); ok {
 		return pod
+	}
+	return nil
+}
+
+// nodeFrom unwraps informer objects into *corev1.Node, tolerating the
+// DeletedFinalStateUnknown tombstone that DeleteFunc may deliver after
+// an informer resync gap. Mirrors podFrom.
+func nodeFrom(obj interface{}) *corev1.Node {
+	if d, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = d.Obj
+	}
+	if node, ok := obj.(*corev1.Node); ok {
+		return node
 	}
 	return nil
 }
