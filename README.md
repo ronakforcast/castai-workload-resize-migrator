@@ -197,12 +197,11 @@ Source pods must:
 ```bash
 helm install castai-workload-resize-migrator ./helm \
   --namespace castai-workload-resize-migrator \
+  --create-namespace \
   --set config.dryRun=true \
   --set config.clmNodeTemplate=<your-clm-template-name> \
   --set config.sourceNodeTemplates=<your-clm-template-name>
 ```
-
-> Note: if the namespace already exists, create it first (`kubectl create namespace castai-workload-resize-migrator`) — the chart also creates it via its own template.
 
 **Step 2 — verify detection** while dry-run is active (generate load on a full node, or watch for stuck-resize pods):
 
@@ -215,6 +214,7 @@ kubectl logs -n castai-workload-resize-migrator deployment/castai-workload-resiz
 ```bash
 helm upgrade castai-workload-resize-migrator ./helm \
   --namespace castai-workload-resize-migrator \
+  --create-namespace \
   --set config.dryRun=false \
   --set config.clmNodeTemplate=<your-clm-template-name> \
   --set config.sourceNodeTemplates=<your-clm-template-name>
