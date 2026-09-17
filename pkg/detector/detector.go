@@ -118,6 +118,18 @@ func (d *Detector) OnPodChange(pod *corev1.Pod) {
 		return
 	}
 
+	// Record firstSeen BEFORE the active-migration early return so the
+	// safety scan retains an accurate pending timestamp for pods whose
+	// migration is already in flight. Without this, a controller restart
+	// combined with a failed migration deadlocks: the informer path never
+	// records firstSeen (early return below), and the safety scan treats
+	// the pod as brand new, so the Deferred threshold never passes.
+	d.mu.Lock()
+	if _, ok := d.firstSeen[key]; !ok {
+		d.firstSeen[key] = time.Now()
+	}
+	d.mu.Unlock()
+
 	// If the migrator already has an active migration for this pod
 	// (e.g. observed on another replica via leader-election failover),
 	// skip it. This is best-effort: the migrator is also idempotent
@@ -129,9 +141,6 @@ func (d *Detector) OnPodChange(pod *corev1.Pod) {
 	}
 
 	d.mu.Lock()
-	if _, ok := d.firstSeen[key]; !ok {
-		d.firstSeen[key] = time.Now()
-	}
 	pendingSince := d.firstSeen[key]
 	d.mu.Unlock()
 
@@ -332,7 +341,19 @@ func (d *Detector) ListSuspectPods(ctx context.Context) []*PodPendingInfo {
 
 		pendingSince := firstSeen
 		if !seen {
-			pendingSince = now
+			// No in-memory firstSeen (controller restarted, or the informer
+			// path was suppressed by the active-migration check). Fall back to
+			// the PodResizePending condition's lastTransitionTime — kubelet
+			// maintains it, so it survives restarts and tells us how long the
+			// resize has actually been stuck. Without this, a Deferred pod
+			// whose migration failed after a restart would never pass the
+			// threshold (pendingSince = now on every scan) and the retry
+			// would never fire.
+			if t := podResizePendingSince(pod); !t.IsZero() {
+				pendingSince = t
+			} else {
+				pendingSince = now
+			}
 		}
 
 		eligible := false
@@ -367,6 +388,22 @@ func (d *Detector) ListSuspectPods(ctx context.Context) []*PodPendingInfo {
 	}
 
 	return suspects
+}
+
+// podResizePendingSince returns the lastTransitionTime of the pod's
+// PodResizePending condition (when it became True). It is the
+// restart-surviving source of truth for how long a resize has been
+// stuck. Returns the zero time when the condition or its timestamp is
+// absent.
+func podResizePendingSince(pod *corev1.Pod) time.Time {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == podResizePendingType && cond.Status == corev1.ConditionTrue {
+			if !cond.LastTransitionTime.IsZero() {
+				return cond.LastTransitionTime.Time
+			}
+		}
+	}
+	return time.Time{}
 }
 
 // isActionableReason reports whether the given PodResizePending reason

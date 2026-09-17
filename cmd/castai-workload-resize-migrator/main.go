@@ -156,6 +156,12 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 		return nil
 	})
 
+	// Skip pods the migrator is already handling at the detector, so a
+	// stream of informer updates for the same pending pod does not
+	// re-populate the queue and re-log. Combined with cluster-state
+	// adoption below, this stays accurate across leader failovers.
+	det.SetMigrationStateChecker(mig)
+
 	q.Start(ctx, 1, func(ctx context.Context, p *detector.PodPendingInfo) error {
 		return mig.Trigger(ctx, []*detector.PodPendingInfo{p})
 	})
@@ -187,6 +193,17 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 		}
 	}
 	slog.Info("informer caches synced")
+
+	// Re-adopt migrations created by previous controller instances (e.g.
+	// before a restart or leader failover) so pods whose migrations are
+	// still in flight are not re-triggered with duplicate CRDs. A failure
+	// to adopt degrades to in-memory-only dedup rather than crashing the
+	// controller on a transient API error at startup.
+	if n, err := mig.AdoptExisting(ctx); err != nil {
+		slog.Error("failed to adopt existing migrations; continuing without adoption", "error", err)
+	} else if n > 0 {
+		slog.Info("adopted in-flight migrations from previous instance", "count", n)
+	}
 
 	var wg sync.WaitGroup
 

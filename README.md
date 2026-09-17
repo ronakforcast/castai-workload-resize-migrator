@@ -83,9 +83,9 @@ sequenceDiagram
 5. **Distinguishes by reason**:
    - `Infeasible` — requested CPU exceeds node's total capacity. The resize can **never** succeed on this node. Migration is triggered **immediately** via informer event — no threshold wait.
    - `Deferred` — node is temporarily full but could fit the resize later. Waits for `PENDING_THRESHOLD` (default 2m). Kubelet periodically retries Deferred resizes, updating the pod status and re-triggering the informer. When the threshold passes, migration is triggered **immediately** via informer event.
-6. **Selects a destination node** — a live-migration-enabled node from the **same CAST AI node template** as the pod's current node (matching CPU generation), in the **same availability zone**, excluding the source node and any destination that previously failed. If no such node exists, the migration **fails safely**: nothing is created, an error is logged, and the pod is left untouched.
+6. **Selects a destination node** — a live-migration-enabled node from the **same CAST AI node template** as the pod's current node (matching CPU generation — and since the template is required to be single-AZ, this also guarantees the same availability zone), excluding the source node. If no such node exists, the migration **fails safely**: nothing is created, an error is logged, and the pod is left untouched.
 7. **Safety scan** runs every 2 minutes (configurable) as a **fallback only** — catches any pods missed during controller restart or informer cache gaps. This is NOT the primary trigger.
-8. **Tracks** migration status and retries on failure (up to `MIGRATION_RETRY_LIMIT`, walking to a different destination node on each retry).
+8. **Tracks** migration status and retries on failure (up to `MIGRATION_RETRY_LIMIT`).
 9. **Cleans up** completed or permanently failed migrations from tracking.
 
 ---

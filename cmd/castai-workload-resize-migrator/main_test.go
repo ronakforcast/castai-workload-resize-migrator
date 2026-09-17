@@ -9,6 +9,7 @@ import (
 
 	"castai-workload-resize-migrator/pkg/config"
 	"castai-workload-resize-migrator/pkg/detector"
+	"castai-workload-resize-migrator/pkg/migrator"
 	"castai-workload-resize-migrator/pkg/workqueue"
 
 	corev1 "k8s.io/api/core/v1"
@@ -411,6 +412,91 @@ func newFakeDynamicClientForLifecycle() dynamic.Interface {
 	}
 	_, _ = client.Resource(schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}).Create(context.Background(), node, metav1.CreateOptions{})
 	return client
+}
+
+// TestDetectorMigratorDedupWiring mirrors the two wiring lines in
+// runController —
+//
+//	det.SetMigrateFunc(...)
+//	det.SetMigrationStateChecker(mig)
+//
+// — and asserts the behavior they exist to provide: once the migrator
+// tracks an active migration for a pod, a repeated OnPodChange for that
+// pod does not invoke the migrate callback again. If main.go's wiring
+// changes (e.g. the SetMigrationStateChecker line is dropped), this
+// mirror flags the divergence the same way TestLeaseLockWiringFromConfig
+// does for the LeaseLock literal.
+func TestDetectorMigratorDedupWiring(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	dyn := newFakeDynamicClientForLifecycle()
+	cfg := config.Config{
+		DryRun:           false,
+		MigrationTimeout: time.Hour,
+	}
+
+	det := detector.New(cs, cfg)
+	mig := migrator.New(cfg, dyn)
+
+	var migrateCalls atomic.Int32
+	det.SetMigrateFunc(func(_ context.Context, p *detector.PodPendingInfo) error {
+		migrateCalls.Add(1)
+		return nil
+	})
+	det.SetMigrationStateChecker(mig)
+
+	pod := infeasiblePendingPod("default", "pod-pending-1", "node-1")
+
+	// First detection: nothing is tracked yet, so the migrate callback
+	// must fire exactly once.
+	det.OnPodChange(pod)
+	if got := migrateCalls.Load(); got != 1 {
+		t.Fatalf("first detection should invoke the migrate callback once, got %d", got)
+	}
+
+	// Make the migrator actually active for this pod — as it becomes once
+	// the queued item is processed — then re-fire the same pod event.
+	info := &detector.PodPendingInfo{
+		Namespace:    "default",
+		PodName:      "pod-pending-1",
+		NodeName:     "node-1",
+		AllocatedCPU: 100,
+		DesiredCPU:   400,
+	}
+	if err := mig.Trigger(context.Background(), []*detector.PodPendingInfo{info}); err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
+	if !mig.IsActive("default", "pod-pending-1") {
+		t.Fatal("expected migrator to track the pod after Trigger")
+	}
+
+	det.OnPodChange(pod)
+	if got := migrateCalls.Load(); got != 1 {
+		t.Fatalf("pod with an active migration must not re-invoke the migrate callback, got %d calls", got)
+	}
+}
+
+// infeasiblePendingPod builds a migration-eligible pod whose in-place CPU
+// resize is stuck with reason Infeasible (triggers immediately, no
+// threshold wait).
+func infeasiblePendingPod(namespace, name, node string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+			Labels:    map[string]string{"live.cast.ai/migration-enabled": "true"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName:   node,
+			Containers: []corev1.Container{{Name: "app"}},
+		},
+		Status: corev1.PodStatus{
+			Conditions: []corev1.PodCondition{{
+				Type:   "PodResizePending",
+				Status: corev1.ConditionTrue,
+				Reason: "Infeasible",
+			}},
+		},
+	}
 }
 
 // TestRunControllerEventPathCreatesMigration is the regression test for the

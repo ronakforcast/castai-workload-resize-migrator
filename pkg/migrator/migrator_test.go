@@ -98,6 +98,42 @@ func seedMigration(t *testing.T, client dynamic.Interface, namespace, name, stat
 	}
 }
 
+// seedManagedMigration puts a Migration CRD carrying spec.podName (and
+// optionally the managed label) with a configurable creation timestamp
+// into the fake dynamic client, so AdoptExisting can be exercised against
+// realistic cluster state. Unlike seedMigration (which only sets state),
+// this mirrors what createMigration writes to the cluster.
+func seedManagedMigration(t *testing.T, client dynamic.Interface, namespace, name, podName, state string, createdAt time.Time, managed bool) {
+	t.Helper()
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "live.cast.ai/v1",
+			"kind":       "Migration",
+			"metadata": map[string]interface{}{
+				"name":      name,
+				"namespace": namespace,
+			},
+			"spec": map[string]interface{}{
+				"podName": podName,
+			},
+		},
+	}
+	if managed {
+		obj.SetLabels(map[string]string{managedLabelKey: managedLabelValue})
+	}
+	if state != "" {
+		if err := unstructured.SetNestedField(obj.Object, state, "status", "state"); err != nil {
+			t.Fatalf("set state on %s/%s: %v", namespace, name, err)
+		}
+	}
+	if !createdAt.IsZero() {
+		obj.SetCreationTimestamp(metav1.NewTime(createdAt))
+	}
+	if _, err := client.Resource(migrationGVR).Namespace(namespace).Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed managed migration %s/%s: %v", namespace, name, err)
+	}
+}
+
 func samplePod() *detector.PodPendingInfo {
 	return &detector.PodPendingInfo{
 		Namespace:    "default",
@@ -125,6 +161,211 @@ func TestTriggerDryRun(t *testing.T) {
 	}
 	if m.IsActive("default", "nginx") {
 		t.Fatal("expected no active migration in dry-run")
+	}
+}
+
+// H1 regression: after a restart/failover the new client starts with an
+// empty in-memory map. AdoptExisting must rebuild tracking from the
+// managed CRDs in the cluster so a re-detected pending pod does not get a
+// duplicate Migration CRD.
+func TestAdoptExistingAdoptsNonTerminal(t *testing.T) {
+	client := newFakeDynamicClient()
+	c := New(config.Config{
+		DryRun:              false,
+		MigrationRetryDelay: 0,
+		MigrationRetryLimit: 3,
+		MigrationTimeout:    10 * time.Minute,
+	}, client)
+
+	seedManagedMigration(t, client, "default", "mig-running", "nginx", "Running", time.Now(), true)
+
+	n, err := c.AdoptExisting(context.Background())
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 adoption, got %d", n)
+	}
+	if !c.IsActive("default", "nginx") {
+		t.Fatal("expected pod to be tracked after adoption")
+	}
+
+	// A re-trigger for the same pod must NOT create a duplicate CRD: the
+	// adopted migration is Running (non-terminal, not Failed), so the
+	// retry path must skip it.
+	if err := c.Trigger(context.Background(), []*detector.PodPendingInfo{samplePod()}); err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
+	list, err := client.Resource(migrationGVR).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("H1 regression: expected exactly 1 migration CRD after re-trigger, got %d", len(list.Items))
+	}
+}
+
+// Terminal (Completed/Succeeded) CRDs have nothing left to track, and
+// CRDs without the managed label belong to someone else: neither may be
+// adopted.
+func TestAdoptExistingSkipsTerminalAndForeign(t *testing.T) {
+	client := newFakeDynamicClient()
+	c := New(config.Config{
+		DryRun:              false,
+		MigrationRetryDelay: 0,
+		MigrationRetryLimit: 3,
+		MigrationTimeout:    10 * time.Minute,
+	}, client)
+
+	seedManagedMigration(t, client, "default", "mig-completed", "nginx", "Completed", time.Now(), true)
+	seedManagedMigration(t, client, "default", "mig-succeeded", "nginx2", "Succeeded", time.Now(), true)
+	seedManagedMigration(t, client, "default", "mig-foreign", "nginx3", "Running", time.Now(), false)
+
+	n, err := c.AdoptExisting(context.Background())
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 adoptions, got %d", n)
+	}
+	for _, pod := range []string{"nginx", "nginx2", "nginx3"} {
+		if c.IsActive("default", pod) {
+			t.Fatalf("pod %s must not be tracked", pod)
+		}
+	}
+}
+
+// A Failed migration adopted across a failover must NOT mint a fresh
+// retry budget: it is pinned at the retry limit, a Trigger skips it, and
+// the next cleanup tick drops the entry so a fresh cycle can begin.
+func TestAdoptExistingFailedSeedsAtRetryCap(t *testing.T) {
+	client := newFakeDynamicClient()
+	c := New(config.Config{
+		DryRun:              false,
+		MigrationRetryDelay: 0,
+		MigrationRetryLimit: 3,
+		MigrationTimeout:    10 * time.Minute,
+	}, client)
+
+	seedManagedMigration(t, client, "default", "mig-failed", "nginx", "Failed", time.Now(), true)
+
+	if _, err := c.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+
+	c.mu.Lock()
+	entry := c.activeMigrations["default/nginx"]
+	c.mu.Unlock()
+	if entry == nil {
+		t.Fatal("expected Failed migration to be adopted")
+	}
+	if entry.retryCount != 3 {
+		t.Fatalf("expected retryCount pinned at limit 3, got %d", entry.retryCount)
+	}
+
+	// No retry may be attempted for the capped entry.
+	if err := c.Trigger(context.Background(), []*detector.PodPendingInfo{samplePod()}); err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
+	list, err := client.Resource(migrationGVR).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("expected no retry CR for capped entry, got %d CRDs", len(list.Items))
+	}
+
+	// Failed + retry limit reached is the cleanup loop's removal condition.
+	c.CleanupCompletedMigrations(context.Background())
+	if c.IsActive("default", "nginx") {
+		t.Fatal("expected capped Failed entry to be removed by cleanup")
+	}
+}
+
+// createdAt must come from the CRD's creationTimestamp so a migration
+// that was already old before the failover still times out on schedule.
+func TestAdoptExistingPreservesTimeout(t *testing.T) {
+	client := newFakeDynamicClient()
+	c := New(config.Config{
+		DryRun:              false,
+		MigrationRetryDelay: 0,
+		MigrationRetryLimit: 3,
+		MigrationTimeout:    10 * time.Minute,
+	}, client)
+
+	seedManagedMigration(t, client, "default", "mig-old", "nginx", "Running", time.Now().Add(-time.Hour), true)
+
+	if _, err := c.AdoptExisting(context.Background()); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if !c.IsActive("default", "nginx") {
+		t.Fatal("expected Running migration to be adopted")
+	}
+
+	// Age (~1h) > MIGRATION_TIMEOUT (10m): if createdAt had been seeded as
+	// now, the entry would survive this cleanup pass.
+	c.CleanupCompletedMigrations(context.Background())
+	if c.IsActive("default", "nginx") {
+		t.Fatal("expected hour-old adopted migration to time out during cleanup; createdAt was not seeded from the CRD")
+	}
+}
+
+// An entry reserved by an in-flight trigger (racing an informer event
+// fired before adoption runs) must win over the cluster's older record.
+func TestAdoptExistingDoesNotOverwriteLiveEntry(t *testing.T) {
+	client := newFakeDynamicClient()
+	c := New(config.Config{
+		DryRun:              false,
+		MigrationRetryDelay: 0,
+		MigrationRetryLimit: 3,
+		MigrationTimeout:    10 * time.Minute,
+	}, client)
+
+	// White-box: a reservation made by an in-flight trigger earlier in
+	// this leadership term (same pattern as the race tests).
+	c.mu.Lock()
+	c.activeMigrations["default/nginx"] = &migrationEntry{
+		name:      "nginx",
+		namespace: "default",
+		createdAt: time.Now(),
+		migration: "mig-live",
+	}
+	c.mu.Unlock()
+
+	seedManagedMigration(t, client, "default", "mig-old", "nginx", "Running", time.Now().Add(-time.Hour), true)
+
+	n, err := c.AdoptExisting(context.Background())
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 adoptions over a live entry, got %d", n)
+	}
+
+	c.mu.Lock()
+	entry := c.activeMigrations["default/nginx"]
+	c.mu.Unlock()
+	if entry.migration != "mig-live" {
+		t.Fatalf("live entry must not be overwritten, got migration=%q", entry.migration)
+	}
+}
+
+// A cluster List failure must surface to the caller (main logs it and
+// continues with in-memory-only dedup) instead of being swallowed.
+func TestAdoptExistingListErrorPropagates(t *testing.T) {
+	client := newFakeDynamicClient()
+	c := New(config.Config{}, client)
+
+	client.PrependReactor("list", "migrations", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("boom")
+	})
+
+	n, err := c.AdoptExisting(context.Background())
+	if err == nil {
+		t.Fatal("expected list error to propagate")
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 adoptions on error, got %d", n)
 	}
 }
 
