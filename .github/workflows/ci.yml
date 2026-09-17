@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Check version consistency (single source: Chart.yaml appVersion)
+      - name: Check version consistency (source of truth is Chart.yaml appVersion)
         run: |
           set -eu
           APPVERSION=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' helm/Chart.yaml)
