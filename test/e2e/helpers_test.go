@@ -33,20 +33,20 @@ import (
 
 var (
 	kubeconfigPath string
-	clientset     *kubernetes.Clientset
-	dynClient     dynamic.Interface
+	clientset      *kubernetes.Clientset
+	dynClient      dynamic.Interface
 )
 
 const (
-	clmNodeSelector      = "scheduling.cast.ai/node-template: clm-live-migration-template"
-	migrationGroup       = "live.cast.ai"
-	migrationVersion     = "v1"
-	migrationResource    = "migrations"
-	testImage            = "nginx:latest"
-	curlImage             = "curlimages/curl:latest"
-	fillImage             = "busybox:latest"
-	defaultWaitTimeout    = 5 * time.Minute
-	pollInterval         = 5 * time.Second
+	clmNodeSelector    = "scheduling.cast.ai/node-template: clm-live-migration-template"
+	migrationGroup     = "live.cast.ai"
+	migrationVersion   = "v1"
+	migrationResource  = "migrations"
+	testImage          = "nginx:latest"
+	curlImage          = "curlimages/curl:latest"
+	fillImage          = "busybox:latest"
+	defaultWaitTimeout = 5 * time.Minute
+	pollInterval       = 5 * time.Second
 )
 
 var migrationGVR = schema.GroupVersionResource{
@@ -174,8 +174,8 @@ func deployFiller(t *testing.T, ns, name, cpu string) {
 					NodeSelector: map[string]string{"scheduling.cast.ai/node-template": "clm-live-migration-template"},
 					Containers: []corev1.Container{
 						{
-							Name:  "stress",
-							Image: fillImage,
+							Name:    "stress",
+							Image:   fillImage,
 							Command: []string{"sh", "-c", "while true; do true; done"},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{

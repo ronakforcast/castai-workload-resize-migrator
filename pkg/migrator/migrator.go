@@ -50,6 +50,13 @@ type migrationEntry struct {
 	retryCount int
 }
 
+// failedDestination records a destination node that exhausted the retry
+// limit for a pod, together with when the exclusion expires.
+type failedDestination struct {
+	node  string
+	until time.Time
+}
+
 // Client creates and tracks CAST AI CLM Migration CRDs.
 type Client struct {
 	cfg    config.Config
@@ -58,14 +65,27 @@ type Client struct {
 	mu               sync.Mutex
 	activeMigrations map[string]*migrationEntry // pod key -> entry
 	nameCounter      atomic.Uint64              // monotonic counter for unique migration names
+
+	// podMigrations tracks migration-creation timestamps per pod key for
+	// the per-hour rate limit (circuit breaker). Entries older than an
+	// hour are pruned on access.
+	podMigrations map[string][]time.Time
+
+	// failedDestinations maps pod key -> destination node that exhausted
+	// the retry limit, with an expiry. selectDestinationNode skips it for
+	// that pod until the TTL lapses, then falls back to any candidate
+	// rather than stranding the pod.
+	failedDestinations map[string]failedDestination
 }
 
 // New creates a new migrator client.
 func New(cfg config.Config, client dynamic.Interface) *Client {
 	return &Client{
-		cfg:              cfg,
-		client:           client,
-		activeMigrations: make(map[string]*migrationEntry),
+		cfg:                cfg,
+		client:             client,
+		activeMigrations:   make(map[string]*migrationEntry),
+		podMigrations:      make(map[string][]time.Time),
+		failedDestinations: make(map[string]failedDestination),
 	}
 }
 
@@ -210,12 +230,25 @@ func (c *Client) retryPolicyAllows(entry *migrationEntry) bool {
 //
 // The first qualifying node is returned. If no candidate exists, an error
 // is returned so the caller fails safely without creating a migration.
-func (c *Client) selectDestinationNode(ctx context.Context, sourceNode string) (string, error) {
+func (c *Client) selectDestinationNode(ctx context.Context, sourceNode, podKey string) (string, error) {
 	list, err := c.client.Resource(nodeGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("list nodes: %w", err)
 	}
 
+	// A destination that exhausted this pod's retry limit is skipped for
+	// FailedDestinationTTL; after the TTL it becomes eligible again.
+	excluded := ""
+	if fd, ok := c.failedDestinations[podKey]; ok {
+		if time.Now().Before(fd.until) {
+			excluded = fd.node
+		} else {
+			delete(c.failedDestinations, podKey)
+		}
+	}
+
+	candidate := ""
+	fallback := ""
 	for _, n := range list.Items {
 		name := n.GetName()
 		if name == sourceNode {
@@ -230,9 +263,25 @@ func (c *Client) selectDestinationNode(ctx context.Context, sourceNode string) (
 		if tmpl := labels["scheduling.cast.ai/node-template"]; c.cfg.CLMNodeTemplate != "" && tmpl != c.cfg.CLMNodeTemplate {
 			continue
 		}
-		return name, nil
+		if name == excluded {
+			// Remember it only as a last-resort fallback: if it is the
+			// sole candidate, re-selecting it still beats stranding the pod.
+			fallback = name
+			continue
+		}
+		candidate = name
+		break
 	}
 
+	if candidate == "" && fallback != "" {
+		slog.Warn("only the previously failed destination remains; re-selecting it to avoid stranding the pod",
+			"pod", podKey, "node", fallback)
+		candidate = fallback
+	}
+
+	if candidate != "" {
+		return candidate, nil
+	}
 	return "", fmt.Errorf("no live-migration-enabled node from node template %q available as destination (source node %q excluded); failing safely without creating migration",
 		c.cfg.CLMNodeTemplate, sourceNode)
 }
@@ -256,12 +305,62 @@ func (c *Client) createMigration(ctx context.Context, p *detector.PodPendingInfo
 		labels["castai-workload-resize-migrator/clm-node-template"] = c.cfg.CLMNodeTemplate
 	}
 
+	// Circuit breaker: cap migrations per pod per hour so a permanently
+	// failing pod cannot loop create -> fail -> re-trigger forever.
+	if c.cfg.MigrationRateLimitPerHour > 0 {
+		now := time.Now()
+		c.mu.Lock()
+		history := c.podMigrations[key]
+		kept := history[:0]
+		for _, t := range history {
+			if now.Sub(t) < time.Hour {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) >= c.cfg.MigrationRateLimitPerHour {
+			c.mu.Unlock()
+			slog.Warn("migration rate limit reached for pod; skipping (circuit breaker)",
+				"pod", key,
+				"createdLastHour", len(kept),
+				"limit", c.cfg.MigrationRateLimitPerHour,
+			)
+			return fmt.Errorf("pod %s exceeded migration rate limit (%d/hour)", key, c.cfg.MigrationRateLimitPerHour)
+		}
+		c.podMigrations[key] = append(kept, now)
+		c.mu.Unlock()
+	}
+
+	// Concurrency cap: a mass-resize event must not stampede the cluster
+	// with migrations all at once. Retries of already-tracked pods are
+	// exempt so the cap cannot starve recovery of in-flight entries.
+	if c.cfg.MaxConcurrentMigrations > 0 && retryCount == 0 {
+		c.mu.Lock()
+		active := len(c.activeMigrations)
+		c.mu.Unlock()
+		if active >= c.cfg.MaxConcurrentMigrations {
+			slog.Warn("max concurrent migrations reached; deferring new migration to next scan",
+				"pod", key, "active", active, "max", c.cfg.MaxConcurrentMigrations)
+			return fmt.Errorf("max concurrent migrations reached (%d)", c.cfg.MaxConcurrentMigrations)
+		}
+	}
+
 	// Destination must be a live-migration-enabled node from the same CLM
 	// node template as the pod's current node, and must differ from it: the
-	// live migration controller rejects same-node migrations. If no such
-	// node exists, the migration fails safely and nothing is created.
-	destination, err := c.selectDestinationNode(ctx, p.NodeName)
+	// live migration controller rejects same-node migrations. A
+	// destination that previously exhausted this pod's retry limit is
+	// skipped until FailedDestinationTTL lapses. If no candidate exists,
+	// the migration fails safely and nothing is created.
+	destination, err := c.selectDestinationNode(ctx, p.NodeName, key)
 	if err != nil {
+		// The rate-limit slot reserved above must not be consumed by a
+		// failed destination selection.
+		if c.cfg.MigrationRateLimitPerHour > 0 {
+			c.mu.Lock()
+			if h := c.podMigrations[key]; len(h) > 0 {
+				c.podMigrations[key] = h[:len(h)-1]
+			}
+			c.mu.Unlock()
+		}
 		return fmt.Errorf("select destination node for %s: %w", key, err)
 	}
 
@@ -306,6 +405,19 @@ func (c *Client) createMigration(ctx context.Context, p *detector.PodPendingInfo
 	c.mu.Unlock()
 
 	return nil
+}
+
+// getMigrationDestination fetches the spec.destination of a Migration CRD.
+func (c *Client) getMigrationDestination(ctx context.Context, namespace, name string) (string, error) {
+	obj, err := c.client.Resource(migrationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	dest, found, err := unstructured.NestedString(obj.Object, "spec", "destination")
+	if err != nil || !found {
+		return "", fmt.Errorf("spec.destination not found: %w", err)
+	}
+	return dest, nil
 }
 
 // getMigrationState fetches the status.state of a Migration CRD.
@@ -400,6 +512,18 @@ func (c *Client) cleanupExpiredMigrations(ctx context.Context) {
 		case "Failed":
 			if it.retryCount >= c.cfg.MigrationRetryLimit {
 				slog.Info("migration failed and retry limit reached, removing from tracking", "pod", it.key, "migration", it.migration, "retries", it.retryCount)
+				// Remember the destination so the pod's next cycle migrates
+				// elsewhere (H3 companion: same node for the in-cycle retries,
+				// then move on). The exclusion lapses after
+				// FailedDestinationTTL.
+				if c.cfg.FailedDestinationTTL > 0 {
+					if dest, err := c.getMigrationDestination(ctx, it.namespace, it.migration); err == nil && dest != "" {
+						c.mu.Lock()
+						c.failedDestinations[it.key] = failedDestination{node: dest, until: time.Now().Add(c.cfg.FailedDestinationTTL)}
+						c.mu.Unlock()
+						slog.Warn("destination exhausted the retry limit; excluding it for this pod until TTL", "pod", it.key, "node", dest, "ttl", c.cfg.FailedDestinationTTL.String())
+					}
+				}
 				remove = true
 			}
 		default:

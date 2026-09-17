@@ -83,7 +83,25 @@ spec:
       {{- end }}
       containers:
         - name: controller
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: DRY_RUN
@@ -102,6 +120,12 @@ spec:
               value: {{ .Values.config.migrationRetryLimit | quote }}
             - name: MIGRATION_RETRY_DELAY
               value: {{ .Values.config.migrationRetryDelay | quote }}
+            - name: MIGRATION_RATE_LIMIT_PER_HOUR
+              value: {{ .Values.config.migrationRateLimitPerHour | quote }}
+            - name: MAX_CONCURRENT_MIGRATIONS
+              value: {{ .Values.config.maxConcurrentMigrations | quote }}
+            - name: FAILED_DESTINATION_TTL
+              value: {{ .Values.config.failedDestinationTTL | quote }}
             - name: CLM_NODE_TEMPLATE
               value: {{ .Values.config.clmNodeTemplate | quote }}
             {{- if .Values.config.sourceNodeTemplates }}

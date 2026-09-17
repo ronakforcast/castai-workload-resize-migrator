@@ -6,11 +6,12 @@
 // (e2e_test.go, gated by the `e2e` build tag).
 //
 // QA-plan coverage:
-//   TC-01: golden path — pod with PodResizePending creates Migration CRD
-//   TC-02: spec.destination equals source node name
-//   TC-03: CLMNodeTemplate label applied
-//   TC-13: leader-election HA is skipped here (needs real cluster / envtest)
-//   TC-16: multiple pods create multiple migrations
+//
+//	TC-01: golden path — pod with PodResizePending creates Migration CRD
+//	TC-02: spec.destination equals source node name
+//	TC-03: CLMNodeTemplate label applied
+//	TC-13: leader-election HA is skipped here (needs real cluster / envtest)
+//	TC-16: multiple pods create multiple migrations
 package e2e
 
 import (
@@ -58,7 +59,7 @@ func newFakeDynamicClient() dynamic.Interface {
 				"metadata": map[string]interface{}{
 					"name": fmt.Sprintf("dest-node-%d", i+1),
 					"labels": map[string]interface{}{
-						"live.cast.ai/migration-enabled":    "true",
+						"live.cast.ai/migration-enabled":   "true",
 						"scheduling.cast.ai/node-template": tmpl,
 						"topology.kubernetes.io/zone":      "zone-a",
 					},
@@ -217,8 +218,8 @@ func TestBusiness_TC03_CLMNodeTemplateLabel(t *testing.T) {
 	cs := fake.NewSimpleClientset(makePendingPod("app-4", "default", "node-1", "Infeasible"))
 	dyn := newFakeDynamicClient()
 	cfg := config.Config{
-		DryRun:          false,
-		CLMNodeTemplate: "castai-spot-xlarge",
+		DryRun:           false,
+		CLMNodeTemplate:  "castai-spot-xlarge",
 		MigrationTimeout: 10 * time.Minute,
 	}
 

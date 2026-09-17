@@ -11,6 +11,37 @@ permissions:
   packages: write
 
 jobs:
+  version-drift:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Check version consistency (single source: Chart.yaml appVersion)
+        run: |
+          set -eu
+          APPVERSION=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' helm/Chart.yaml)
+          if [ -z "$APPVERSION" ]; then
+            echo "Chart.yaml appVersion not found"; exit 1
+          fi
+          echo "Chart appVersion: $APPVERSION"
+          DRIFT=0
+          # values.yaml must not hardcode an image tag (defaults to appVersion)
+          if grep -qE '^\s*tag: "[0-9]' helm/values.yaml; then
+            echo "DRIFT: helm/values.yaml hardcodes an image tag; leave it empty to default to appVersion"; DRIFT=1
+          fi
+          # No hardcoded image:tag references outside Chart.yaml
+          for f in $(grep -rlE 'castai-workload-resize-migrator:[0-9]+\.[0-9]+' \
+              --include='*.yaml' --include='*.yml' --include='*.md' . \
+              | grep -v '^./helm/Chart.yaml'); do
+            echo "DRIFT: hardcoded version reference in $f"; DRIFT=1
+          done
+          # The git tag (when pushing one) must match appVersion
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "refs/tags/v$APPVERSION" != "$GITHUB_REF" ]; then
+            echo "DRIFT: git tag $GITHUB_REF does not match Chart.yaml appVersion v$APPVERSION"; DRIFT=1
+          fi
+          if [ "$DRIFT" = "1" ]; then exit 1; fi
+          echo "No version drift."
   test:
     name: Build, vet, race tests
     runs-on: ubuntu-latest

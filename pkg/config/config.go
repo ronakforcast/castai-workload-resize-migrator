@@ -21,7 +21,16 @@ type Config struct {
 	MigrationCleanupInterval time.Duration
 	MigrationRetryLimit      int
 	MigrationRetryDelay      time.Duration
-	CLMNodeTemplate          string
+	// MigrationRateLimitPerHour caps how many migrations may be created
+	// for a single pod within an hour (circuit breaker). 0 disables.
+	MigrationRateLimitPerHour int
+	// MaxConcurrentMigrations caps how many migrations may be in flight
+	// (tracked, non-terminal) at once across all pods. 0 disables.
+	MaxConcurrentMigrations int
+	// FailedDestinationTTL is how long a destination node that exhausted
+	// the retry limit stays excluded for that pod. 0 disables exclusion.
+	FailedDestinationTTL time.Duration
+	CLMNodeTemplate      string
 	// SourceNodeTemplates scopes the controller to pods running on nodes
 	// provisioned from these CAST AI node templates (node label
 	// scheduling.cast.ai/node-template). Empty means all pods.
@@ -35,20 +44,23 @@ type Config struct {
 // Load reads configuration from environment variables.
 func Load() Config {
 	return Config{
-		DryRun:                   getBool("DRY_RUN", true),
-		PendingThreshold:         getDuration("PENDING_THRESHOLD", 2*time.Minute),
-		SafetyScanInterval:       getDuration("SAFETY_SCAN_INTERVAL", 2*time.Minute),
-		SafetyScanStartupDelay:   getDuration("SAFETY_SCAN_STARTUP_DELAY", 10*time.Second),
-		MigrationTimeout:         getPositiveDuration("MIGRATION_TIMEOUT", 10*time.Minute),
-		MigrationCleanupInterval: getDuration("MIGRATION_CLEANUP_INTERVAL", 30*time.Second),
-		MigrationRetryLimit:      getInt("MIGRATION_RETRY_LIMIT", 3),
-		MigrationRetryDelay:      getDuration("MIGRATION_RETRY_DELAY", 30*time.Second),
-		CLMNodeTemplate:          getString("CLM_NODE_TEMPLATE", "clm-live-migration-template"),
-		SourceNodeTemplates:      getStringSlice("SOURCE_NODE_TEMPLATES", ""),
-		LeaderElection:           getBool("LEADER_ELECTION_ENABLED", true),
-		LeaseName:                getString("LEADER_ELECTION_LEASE_NAME", "castai-workload-resize-migrator"),
-		PodNamespace:             getString("POD_NAMESPACE", ""),
-		PodName:                  getString("POD_NAME", ""),
+		DryRun:                    getBool("DRY_RUN", true),
+		PendingThreshold:          getDuration("PENDING_THRESHOLD", 2*time.Minute),
+		SafetyScanInterval:        getDuration("SAFETY_SCAN_INTERVAL", 2*time.Minute),
+		SafetyScanStartupDelay:    getDuration("SAFETY_SCAN_STARTUP_DELAY", 10*time.Second),
+		MigrationTimeout:          getPositiveDuration("MIGRATION_TIMEOUT", 10*time.Minute),
+		MigrationCleanupInterval:  getDuration("MIGRATION_CLEANUP_INTERVAL", 30*time.Second),
+		MigrationRetryLimit:       getInt("MIGRATION_RETRY_LIMIT", 3),
+		MigrationRetryDelay:       getDuration("MIGRATION_RETRY_DELAY", 30*time.Second),
+		MigrationRateLimitPerHour: getInt("MIGRATION_RATE_LIMIT_PER_HOUR", 5),
+		MaxConcurrentMigrations:   getInt("MAX_CONCURRENT_MIGRATIONS", 3),
+		FailedDestinationTTL:      getDuration("FAILED_DESTINATION_TTL", 1*time.Hour),
+		CLMNodeTemplate:           getString("CLM_NODE_TEMPLATE", "clm-live-migration-template"),
+		SourceNodeTemplates:       getStringSlice("SOURCE_NODE_TEMPLATES", ""),
+		LeaderElection:            getBool("LEADER_ELECTION_ENABLED", true),
+		LeaseName:                 getString("LEADER_ELECTION_LEASE_NAME", "castai-workload-resize-migrator"),
+		PodNamespace:              getString("POD_NAMESPACE", ""),
+		PodName:                   getString("POD_NAME", ""),
 	}
 }
 

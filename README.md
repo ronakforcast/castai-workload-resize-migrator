@@ -241,7 +241,7 @@ kubectl apply -f k8s/deployment.yaml
 | Parameter | Default | Description |
 |---|---|---|
 | `image.repository` | `ghcr.io/ronakforcast/castai-workload-resize-migrator` | Container image repository |
-| `image.tag` | `0.1.0` | Container image tag |
+| `image.tag` | chart `appVersion` | Container image tag (defaults to Chart.yaml appVersion — do not hardcode) |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `replicaCount` | `1` | Number of replicas (leader election ensures single active) |
 | `namespace` | `castai-workload-resize-migrator` | Namespace to deploy into |
@@ -249,6 +249,9 @@ kubectl apply -f k8s/deployment.yaml
 | `config.pendingThreshold` | `2m` | How long a Deferred resize must be pending before triggering migration. Infeasible resizes skip this wait. |
 | `config.safetyScanInterval` | `2m` | How often the fallback safety scan runs (NOT the primary trigger — migrations are event-driven) |
 | `config.migrationTimeout` | `10m` | How long a migration is considered active before expiring |
+| `config.migrationRateLimitPerHour` | `5` | Circuit breaker: max migrations per pod per hour (0 disables) |
+| `config.maxConcurrentMigrations` | `3` | Max migrations in flight across all pods (0 disables) |
+| `config.failedDestinationTTL` | `"1h"` | How long a destination that exhausted the retry limit stays excluded for that pod (0 disables) |
 | `config.migrationRetryLimit` | `3` | Max retries per failed migration |
 | `config.migrationRetryDelay` | `30s` | Minimum delay before retrying a failed migration |
 | `config.migrationAlertThreshold` | `3` | Migrations per workload per hour before alerting |

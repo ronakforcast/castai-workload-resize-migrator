@@ -3,7 +3,9 @@
 # -- Controller image
 image:
   repository: ghcr.io/ronakforcast/castai-workload-resize-migrator
-  tag: "0.1.7"
+  # tag defaults to the chart appVersion (single source of truth in
+  # Chart.yaml). CI fails on any hardcoded drift, so do not set it here.
+  tag: ""
   pullPolicy: IfNotPresent
 
 # -- Number of controller replicas (leader election ensures only one is active)
@@ -34,6 +36,13 @@ config:
 
   # -- Max retries per failed migration
   migrationRetryLimit: 3
+  # -- Circuit breaker: max migrations per pod per hour (0 disables)
+  migrationRateLimitPerHour: 5
+  # -- Max migrations in flight across all pods (0 disables)
+  maxConcurrentMigrations: 3
+  # -- How long a destination that exhausted the retry limit stays
+  # excluded for that pod (0 disables)
+  failedDestinationTTL: "1h"
 
   # -- Minimum delay before retrying a failed migration
   migrationRetryDelay: "30s"

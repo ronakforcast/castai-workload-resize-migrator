@@ -5,9 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +42,9 @@ const (
 	// retryPeriod is the time between leader election action attempts.
 	// Matches the k8s client-go default.
 	retryPeriod = 2 * time.Second
+
+	// healthPort is where /healthz and /readyz are served.
+	healthPort = ":8081"
 )
 
 func main() {
@@ -146,6 +151,54 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 	det := detector.New(clientset, cfg)
 	mig := migrator.New(cfg, dynamicClient)
 
+	// Health endpoints. readyCacheSynced flips once informer caches have
+	// synced; heartbeat is touched by every controller activity (pod/node
+	// events, scans, cleanups, migrations). /healthz fails when the
+	// controller has been silent for longer than healthStaleAfter, so a
+	// wedged-but-running process gets restarted — safe, because H1
+	// adoption rebuilds in-flight tracking on restart.
+	var readyCacheSynced atomic.Bool
+	var heartbeat atomic.Int64
+	touch := func() { heartbeat.Store(time.Now().UnixNano()) }
+	touch()
+	healthStaleAfter := 3 * cfg.SafetyScanInterval
+	if healthStaleAfter < 6*time.Minute {
+		healthStaleAfter = 6 * time.Minute
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if readyCacheSynced.Load() {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("ok"))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("informer caches not synced"))
+	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		last := time.Unix(0, heartbeat.Load())
+		if time.Since(last) < healthStaleAfter {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("ok"))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprintf(w, "no controller activity for %s", time.Since(last).Round(time.Second))
+	})
+	healthServer := &http.Server{Addr: healthPort, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		healthServer.Shutdown(shutdownCtx)
+	}()
+	go func() {
+		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("health server failed", "error", err)
+		}
+	}()
+
 	// Route detector callbacks through a typed workqueue so a slow
 	// migration create cannot throttle the informer event handler.
 	// The queue is drained by a single worker below.
@@ -171,9 +224,9 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 
 	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { det.OnPodChange(podFrom(obj)) },
-		UpdateFunc: func(_, newObj interface{}) { det.OnPodChange(podFrom(newObj)) },
-		DeleteFunc: func(obj interface{}) { det.OnPodDelete(podFrom(obj)) },
+		AddFunc:    func(obj interface{}) { touch(); det.OnPodChange(podFrom(obj)) },
+		UpdateFunc: func(_, newObj interface{}) { touch(); det.OnPodChange(podFrom(newObj)) },
+		DeleteFunc: func(obj interface{}) { touch(); det.OnPodDelete(podFrom(obj)) },
 	})
 
 	// Node informer feeds the detector's node-template map, used to scope
@@ -192,6 +245,7 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 			return context.Canceled
 		}
 	}
+	readyCacheSynced.Store(true)
 	slog.Info("informer caches synced")
 
 	// Re-adopt migrations created by previous controller instances (e.g.
@@ -231,6 +285,7 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				touch()
 				scanSafety(ctx, det, mig)
 			}
 		}
@@ -247,6 +302,7 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				touch()
 				mig.CleanupCompletedMigrations(ctx)
 			}
 		}
@@ -257,6 +313,9 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 		"safetyScanInterval", cfg.SafetyScanInterval,
 		"safetyScanStartupDelay", cfg.SafetyScanStartupDelay,
 		"migrationCleanupInterval", cfg.MigrationCleanupInterval,
+		"migrationRateLimitPerHour", cfg.MigrationRateLimitPerHour,
+		"maxConcurrentMigrations", cfg.MaxConcurrentMigrations,
+		"failedDestinationTTL", cfg.FailedDestinationTTL.String(),
 	)
 
 	// Block until shutdown is signalled, and only then drain the queue
