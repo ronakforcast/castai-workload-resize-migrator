@@ -242,6 +242,8 @@ kubectl apply -f k8s/deployment.yaml
 |---|---|---|
 | `image.repository` | `ghcr.io/ronakforcast/castai-workload-resize-migrator` | Container image repository |
 | `image.tag` | chart `appVersion` | Container image tag (defaults to Chart.yaml appVersion — do not hardcode) |
+| `resources.requests` | `500m` / `1Gi` | Guaranteed CPU/memory floor (sized for ~3000-pod clusters) |
+| `resources.limits` | `1` CPU / `2Gi` | Burst ceiling for GC and per-scan pod lists |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
 | `replicaCount` | `1` | Number of replicas (leader election ensures single active) |
 | `namespace` | `castai-workload-resize-migrator` | Namespace to deploy into |

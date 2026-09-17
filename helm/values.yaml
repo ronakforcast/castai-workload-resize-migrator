@@ -61,13 +61,16 @@ config:
   # -- Name of the leader election lease (must match the leases resourceName in ClusterRole)
   leaderElectionLeaseName: "castai-workload-resize-migrator"
 
-# -- Resource requests and limits for the controller pod
+# -- Resource requests and limits for the controller pod. Sized for
+# clusters up to ~3000 pods: requests guarantee a 500m CPU / 1Gi floor,
+# limits allow GC and per-scan full-pod-list bursts.
 resources:
   requests:
-    cpu: "50m"
-    memory: "64Mi"
+    cpu: "500m"
+    memory: "1Gi"
   limits:
-    memory: "256Mi"
+    cpu: "1"
+    memory: "2Gi"
 
 # -- Node selector for the controller pod
 nodeSelector: {}
