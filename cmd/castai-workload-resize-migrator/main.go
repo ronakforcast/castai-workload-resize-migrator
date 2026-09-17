@@ -77,8 +77,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Health endpoints serve on EVERY replica, leader or standby. A
+	// standby that is waiting for the leader lease must still answer
+	// probes, otherwise a rolling update deadlocks: the new pod is never
+	// Ready until the old leader terminates, and the old leader is only
+	// terminated once the new pod is Ready.
+	//
+	// Semantics: a standby is healthy/ready by definition (it does no
+	// work until it acquires the lease). The leader additionally gates
+	// readiness on informer cache sync and liveness on a controller
+	// activity heartbeat, so a wedged leader gets restarted — safe,
+	// because AdoptExisting rebuilds in-flight tracking on restart.
+	health := &controllerHealth{}
+	health.touch()
+	healthStaleAfter := 3 * cfg.SafetyScanInterval
+	if healthStaleAfter < 6*time.Minute {
+		healthStaleAfter = 6 * time.Minute
+	}
+	go serveHealth(ctx, health, healthStaleAfter)
+
 	if !shouldUseLeaderElection(cfg) {
-		if err := runController(ctx, cfg, clientset, dynamicClient); err != nil && err != context.Canceled {
+		health.leading.Store(true)
+		if err := runController(ctx, cfg, clientset, dynamicClient, health); err != nil && err != context.Canceled {
 			slog.Error("controller exited with error", "error", err)
 			os.Exit(1)
 		}
@@ -116,12 +136,14 @@ func main() {
 			OnStartedLeading: func(ctx context.Context) {
 				runCtx, cancel := context.WithCancel(ctx)
 				defer cancel()
+				health.leading.Store(true)
+				defer health.leading.Store(false)
 				slog.Info("acquired leader lease; starting controller",
 					"lease", cfg.LeaseName,
 					"namespace", cfg.PodNamespace,
 					"identity", identity,
 				)
-				if err := runController(runCtx, cfg, clientset, dynamicClient); err != nil && err != context.Canceled {
+				if err := runController(runCtx, cfg, clientset, dynamicClient, health); err != nil && err != context.Canceled {
 					slog.Error("controller exited with error", "error", err)
 				}
 			},
@@ -139,36 +161,30 @@ func main() {
 	leaderelection.RunOrDie(ctx, leCfg)
 }
 
-// runController wires the detector, migrator, workqueue, informers, and
-// background loops together and blocks until ctx is cancelled. The leader
-// election wrapper (when enabled) calls this from OnStartedLeading with a
-// per-leadership context; otherwise main calls it directly.
-//
-// Returning ctx.Err() lets callers distinguish a clean shutdown from an
-// unexpected failure (RunOrDie does not return on the leader path, so the
-// returned error is mainly useful for the leader-election-disabled path).
-func runController(ctx context.Context, cfg config.Config, clientset kubernetes.Interface, dynamicClient dynamic.Interface) error {
-	det := detector.New(clientset, cfg)
-	mig := migrator.New(cfg, dynamicClient)
+// controllerHealth carries the shared liveness/readiness state. All
+// fields are atomics so the HTTP handlers can read them lock-free.
+type controllerHealth struct {
+	// leading is true while this instance holds the leader lease (or
+	// leader election is disabled).
+	leading atomic.Bool
+	// synced flips once the leader's informer caches have synced.
+	synced atomic.Bool
+	// heartbeat is the UnixNano timestamp of the last controller
+	// activity (informer events, scans, cleanups).
+	heartbeat atomic.Int64
+}
 
-	// Health endpoints. readyCacheSynced flips once informer caches have
-	// synced; heartbeat is touched by every controller activity (pod/node
-	// events, scans, cleanups, migrations). /healthz fails when the
-	// controller has been silent for longer than healthStaleAfter, so a
-	// wedged-but-running process gets restarted — safe, because H1
-	// adoption rebuilds in-flight tracking on restart.
-	var readyCacheSynced atomic.Bool
-	var heartbeat atomic.Int64
-	touch := func() { heartbeat.Store(time.Now().UnixNano()) }
-	touch()
-	healthStaleAfter := 3 * cfg.SafetyScanInterval
-	if healthStaleAfter < 6*time.Minute {
-		healthStaleAfter = 6 * time.Minute
-	}
+func (h *controllerHealth) touch() { h.heartbeat.Store(time.Now().UnixNano()) }
 
+// serveHealth runs the /healthz and /readyz HTTP endpoints until ctx is
+// cancelled. It runs on every replica: a standby answers 200 (its only
+// duty is to take over, and the leader-election loop restarts it on
+// failure); the leader additionally gates readiness on cache sync and
+// liveness on the activity heartbeat.
+func serveHealth(ctx context.Context, h *controllerHealth, staleAfter time.Duration) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if readyCacheSynced.Load() {
+		if !h.leading.Load() || h.synced.Load() {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("ok"))
 			return
@@ -177,8 +193,13 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 		w.Write([]byte("informer caches not synced"))
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		last := time.Unix(0, heartbeat.Load())
-		if time.Since(last) < healthStaleAfter {
+		if !h.leading.Load() {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("standby"))
+			return
+		}
+		last := time.Unix(0, h.heartbeat.Load())
+		if time.Since(last) < staleAfter {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("ok"))
 			return
@@ -186,18 +207,31 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprintf(w, "no controller activity for %s", time.Since(last).Round(time.Second))
 	})
-	healthServer := &http.Server{Addr: healthPort, Handler: mux}
+	server := &http.Server{Addr: healthPort, Handler: mux}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		healthServer.Shutdown(shutdownCtx)
+		server.Shutdown(shutdownCtx)
 	}()
-	go func() {
-		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("health server failed", "error", err)
-		}
-	}()
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("health server failed", "error", err)
+	}
+}
+
+// runController wires the detector, migrator, workqueue, informers, and
+// background loops together and blocks until ctx is cancelled. The leader
+// election wrapper (when enabled) calls this from OnStartedLeading with a
+// per-leadership context; otherwise main calls it directly.
+//
+// Returning ctx.Err() lets callers distinguish a clean shutdown from an
+// unexpected failure (RunOrDie does not return on the leader path, so the
+// returned error is mainly useful for the leader-election-disabled path).
+func runController(ctx context.Context, cfg config.Config, clientset kubernetes.Interface, dynamicClient dynamic.Interface, health *controllerHealth) error {
+	det := detector.New(clientset, cfg)
+	mig := migrator.New(cfg, dynamicClient)
+	touch := health.touch
+	health.touch()
 
 	// Route detector callbacks through a typed workqueue so a slow
 	// migration create cannot throttle the informer event handler.
@@ -245,7 +279,7 @@ func runController(ctx context.Context, cfg config.Config, clientset kubernetes.
 			return context.Canceled
 		}
 	}
-	readyCacheSynced.Store(true)
+	health.synced.Store(true)
 	slog.Info("informer caches synced")
 
 	// Re-adopt migrations created by previous controller instances (e.g.

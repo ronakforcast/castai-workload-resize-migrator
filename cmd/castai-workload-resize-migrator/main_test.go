@@ -525,7 +525,7 @@ func TestRunControllerEventPathCreatesMigration(t *testing.T) {
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- runController(ctx, cfg, cs, dyn) }()
+	go func() { done <- runController(ctx, cfg, cs, dyn, &controllerHealth{}) }()
 
 	// Give the informer factory time to start and sync the (empty) cache.
 	time.Sleep(500 * time.Millisecond)
