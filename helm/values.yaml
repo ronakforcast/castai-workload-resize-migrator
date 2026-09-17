@@ -3,7 +3,7 @@
 # -- Controller image
 image:
   repository: ghcr.io/ronakforcast/castai-workload-resize-migrator
-  tag: "0.1.5"
+  tag: "0.1.7"
   pullPolicy: IfNotPresent
 
 # -- Number of controller replicas (leader election ensures only one is active)
