@@ -44,6 +44,11 @@ config:
   # excluded for that pod (0 disables)
   failedDestinationTTL: "1h"
 
+  # -- Label selector a destination node must satisfy entirely (e.g.
+  # topology.kubernetes.io/zone: ap-south-1b). Required for zonal PVCs
+  # whose data cannot cross AZs; empty disables the filter.
+  destinationNodeSelector: {}
+
   # -- Minimum delay before retrying a failed migration
   migrationRetryDelay: "30s"
 

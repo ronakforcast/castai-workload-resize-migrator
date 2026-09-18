@@ -164,3 +164,54 @@ func TestFailedDestinationFallbackNeverStrands(t *testing.T) {
 		t.Fatalf("expected fallback to the sole candidate %q, got %q", dest, again)
 	}
 }
+
+// TestDestinationNodeSelectorFilter verifies the zone-pin filter: a
+// destination must match every configured selector entry, and nodes in
+// other zones are never selected (the zonal-PVC failure mode).
+func TestDestinationNodeSelectorFilter(t *testing.T) {
+	cfg := config.Config{
+		CLMNodeTemplate:         "clm-live-migration-template",
+		DestinationNodeSelector: map[string]string{"topology.kubernetes.io/zone": "ap-south-1b"},
+	}
+	m := newFakeMigrator(t, cfg)
+	// The default seeds create dest-node-1 in zone-a; add a 1b node.
+	zoneB := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Node",
+		"metadata": map[string]interface{}{
+			"name": "zone-b-node",
+			"labels": map[string]interface{}{
+				"live.cast.ai/migration-enabled":   "true",
+				"scheduling.cast.ai/node-template": "clm-live-migration-template",
+				"topology.kubernetes.io/zone":      "ap-south-1b",
+			},
+		},
+	}}
+	if _, err := m.client.Resource(nodeGVR).Create(context.Background(), zoneB, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed zone-b node: %v", err)
+	}
+	ctx := context.Background()
+	got, err := m.selectDestinationNode(ctx, "src", "default/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "zone-b-node" {
+		t.Fatalf("expected zone-b-node with selector set, got %q", got)
+	}
+
+	// Without the selector, either node may be selected (filter disabled).
+	m2 := newFakeMigrator(t, config.Config{CLMNodeTemplate: "clm-live-migration-template"})
+	zoneB2 := zoneB.DeepCopy()
+	zoneB2.SetName("zone-b-node")
+	if _, err := m2.client.Resource(nodeGVR).Create(context.Background(), zoneB.DeepCopy(), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed zone-b node: %v", err)
+	}
+	_ = zoneB2
+	got2, err := m2.selectDestinationNode(ctx, "src", "default/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2 == "" {
+		t.Fatal("expected a destination with no selector configured")
+	}
+}

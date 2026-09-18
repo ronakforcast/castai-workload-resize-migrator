@@ -30,7 +30,11 @@ type Config struct {
 	// FailedDestinationTTL is how long a destination node that exhausted
 	// the retry limit stays excluded for that pod. 0 disables exclusion.
 	FailedDestinationTTL time.Duration
-	CLMNodeTemplate      string
+	// DestinationNodeSelector constrains destination nodes by labels
+	// (e.g. topology.kubernetes.io/zone=ap-south-1b for zonal PVCs). A
+	// destination must match every entry. Empty disables the filter.
+	DestinationNodeSelector map[string]string
+	CLMNodeTemplate         string
 	// SourceNodeTemplates scopes the controller to pods running on nodes
 	// provisioned from these CAST AI node templates (node label
 	// scheduling.cast.ai/node-template). Empty means all pods.
@@ -55,6 +59,7 @@ func Load() Config {
 		MigrationRateLimitPerHour: getInt("MIGRATION_RATE_LIMIT_PER_HOUR", 5),
 		MaxConcurrentMigrations:   getInt("MAX_CONCURRENT_MIGRATIONS", 3),
 		FailedDestinationTTL:      getDuration("FAILED_DESTINATION_TTL", 1*time.Hour),
+		DestinationNodeSelector:   getEnvMap("DESTINATION_NODE_SELECTOR"),
 		CLMNodeTemplate:           getString("CLM_NODE_TEMPLATE", "clm-live-migration-template"),
 		SourceNodeTemplates:       getStringSlice("SOURCE_NODE_TEMPLATES", ""),
 		LeaderElection:            getBool("LEADER_ELECTION_ENABLED", true),
@@ -62,6 +67,28 @@ func Load() Config {
 		PodNamespace:              getString("POD_NAMESPACE", ""),
 		PodName:                   getString("POD_NAME", ""),
 	}
+}
+
+// getEnvMap reads a comma-separated key=value env var into a trimmed,
+// non-empty map. Empty value yields nil (filter disabled).
+func getEnvMap(key string) map[string]string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, part := range strings.Split(v, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) == 2 {
+			if k, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1]); k != "" && val != "" {
+				out[k] = val
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // getStringSlice reads a comma-separated env var into a trimmed,

@@ -263,6 +263,12 @@ func (c *Client) selectDestinationNode(ctx context.Context, sourceNode, podKey s
 		if tmpl := labels["scheduling.cast.ai/node-template"]; c.cfg.CLMNodeTemplate != "" && tmpl != c.cfg.CLMNodeTemplate {
 			continue
 		}
+		// DestinationNodeSelector: every configured label pair must match
+		// (e.g. pin topology.kubernetes.io/zone for zonal PVCs whose data
+		// cannot cross AZs). Empty selector disables the filter.
+		if !nodeMatchesSelector(labels, c.cfg.DestinationNodeSelector) {
+			continue
+		}
 		if name == excluded {
 			// Remember it only as a last-resort fallback: if it is the
 			// sole candidate, re-selecting it still beats stranding the pod.
@@ -284,6 +290,17 @@ func (c *Client) selectDestinationNode(ctx context.Context, sourceNode, podKey s
 	}
 	return "", fmt.Errorf("no live-migration-enabled node from node template %q available as destination (source node %q excluded); failing safely without creating migration",
 		c.cfg.CLMNodeTemplate, sourceNode)
+}
+
+// nodeMatchesSelector reports whether a node's labels satisfy every
+// key=value pair in the selector. A nil/empty selector matches any node.
+func nodeMatchesSelector(labels map[string]string, selector map[string]string) bool {
+	for k, want := range selector {
+		if labels == nil || labels[k] != want {
+			return false
+		}
+	}
+	return true
 }
 
 // createMigration creates a new Migration CRD for the pod and records the

@@ -128,6 +128,10 @@ spec:
               value: {{ .Values.config.maxConcurrentMigrations | quote }}
             - name: FAILED_DESTINATION_TTL
               value: {{ .Values.config.failedDestinationTTL | quote }}
+            {{- with .Values.config.destinationNodeSelector }}
+            - name: DESTINATION_NODE_SELECTOR
+              value: {{ range $k, $v := . }}{{ $k }}={{ $v }},{{ end }}
+            {{- end }}
             - name: CLM_NODE_TEMPLATE
               value: {{ .Values.config.clmNodeTemplate | quote }}
             {{- if .Values.config.sourceNodeTemplates }}

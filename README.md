@@ -256,6 +256,7 @@ kubectl apply -f k8s/deployment.yaml
 | `config.migrationRateLimitPerHour` | `5` | Circuit breaker: max migrations per pod per hour (0 disables) |
 | `config.maxConcurrentMigrations` | `3` | Max migrations in flight across all pods (0 disables) |
 | `config.failedDestinationTTL` | `"1h"` | How long a destination that exhausted the retry limit stays excluded for that pod (0 disables) |
+| `config.destinationNodeSelector` | `{}` | Label selector destination nodes must fully match. **Set for zonal PVCs** (e.g. `topology.kubernetes.io/zone: ap-south-1b`) so destinations never cross the PVC's AZ |
 | `config.migrationRetryLimit` | `3` | Max retries per failed migration |
 | `config.migrationRetryDelay` | `30s` | Minimum delay before retrying a failed migration |
 | `config.migrationAlertThreshold` | `3` | Migrations per workload per hour before alerting |
