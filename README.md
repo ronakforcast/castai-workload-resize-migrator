@@ -195,7 +195,8 @@ Source pods must:
 **Step 1 — install in dry-run mode first** (safe canary: the controller logs what it would migrate, but creates nothing):
 
 ```bash
-helm install castai-workload-resize-migrator ./helm \
+helm install castai-workload-resize-migrator \
+  oci://ghcr.io/ronakforcast/charts/castai-workload-resize-migrator \
   --namespace castai-workload-resize-migrator \
   --create-namespace \
   --set config.dryRun=true \
@@ -212,7 +213,8 @@ kubectl logs -n castai-workload-resize-migrator deployment/castai-workload-resiz
 **Step 3 — enable real migrations** once detection looks right:
 
 ```bash
-helm upgrade castai-workload-resize-migrator ./helm \
+helm upgrade castai-workload-resize-migrator \
+  oci://ghcr.io/ronakforcast/charts/castai-workload-resize-migrator \
   --namespace castai-workload-resize-migrator \
   --create-namespace \
   --set config.dryRun=false \
